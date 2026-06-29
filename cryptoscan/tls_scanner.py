@@ -162,7 +162,8 @@ def _enumerate_tls12_suites(host: str, port: int, timeout: float) -> list[str]:
     returns [] for a TLS-1.3-only server (handled by the raw probe instead)."""
     accepted: list[str] = []
     excluded = ""
-    for _ in range(32):  # safety cap; real servers run out of suites well before
+    each = min(timeout, 5.0)
+    for _ in range(16):  # safety cap; real servers run out of suites well before
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
@@ -178,7 +179,7 @@ def _enumerate_tls12_suites(host: str, port: int, timeout: float) -> list[str]:
                 f"ALL:COMPLEMENTOFALL{excluded}")):
             break
         try:
-            with socket.create_connection((host, port), timeout=timeout) as sock:
+            with socket.create_connection((host, port), timeout=each) as sock:
                 with ctx.wrap_socket(sock, server_hostname=host) as tls:
                     c = tls.cipher()
                     name = c[0] if c else None

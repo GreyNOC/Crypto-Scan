@@ -363,12 +363,18 @@ def probe(host: str, port: int = 443, timeout: float = 8.0) -> TLS13Observation:
 
 def _enumerate_tls13_ciphers(host: str, port: int, timeout: float) -> list[str]:
     accepted: list[str] = []
+    # Tighter per-handshake timeout so enumeration can't dominate the scan.
+    each = min(timeout, 4.0)
     for code, name in TLS13_CIPHER_SUITES.items():
         try:
             ch = build_client_hello(host, cipher_suites=(code,))
-            res = _read_handshake(host, port, ch, timeout)
+            res = _read_handshake(host, port, ch, each)
         except Exception:  # noqa: BLE001 — enumeration is advisory
-            continue
-        if res.error is None and res.cipher_suite == code:
+            break
+        if res.error is not None:
+            # Transport/connect failure -> the host won't do better for the
+            # other suites; stop rather than burn a timeout per suite.
+            break
+        if res.cipher_suite == code:
             accepted.append(name)
     return accepted

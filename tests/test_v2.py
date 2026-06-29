@@ -891,6 +891,33 @@ def test_ssh_pq_hybrids_are_safe():
 
 # --- PKI / certificate-file scanning ---------------------------------------
 
+def test_pki_surfaces_key_agreement_key_files_as_hndl(tmp_path):
+    # Crown-jewel HNDL: an X25519/X448/DH key file must NOT be silently dropped.
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import x25519, x448
+    from cryptoscan import pki_scanner
+    xk = x25519.X25519PrivateKey.generate()
+    (tmp_path / "x.key").write_bytes(xk.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()))
+    fs = pki_scanner.scan(tmp_path)
+    x = next((f for f in fs if f.fact.name == "X25519"), None)
+    assert x is not None and x.hndl_exposed() is True
+    # X448 key type is also recognized (no silent fall-through).
+    assert pki_scanner._key_token(
+        x448.X448PrivateKey.generate().public_key())[0] == "X448"
+
+
+def test_ssh_rsa_cert_variant_flags_sha1(monkeypatch):
+    obs = _ssh.SSHObservation(
+        host="h", port=22,
+        host_key_algorithms=["ssh-rsa-cert-v01@openssh.com"])
+    monkeypatch.setattr(_ssh, "probe", lambda *a, **k: obs)
+    pairs = {(f.fact.name, f.extra.get("role")) for f in _ssh.scan("h", 22)}
+    assert ("RSA", "hostkey") in pairs
+    assert ("SHA-1", "hostkey-hash") in pairs
+
+
 def test_pki_scan_classifies_certs_and_keys(tmp_path):
     import datetime
     from cryptography import x509

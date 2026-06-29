@@ -173,8 +173,10 @@ def _read_packet(sock: socket.socket, leftover: bytes,
             return None
         buf += chunk
     pad_len = buf[4]
-    payload = bytes(buf[5:5 + (pkt_len - pad_len - 1)])
-    return payload
+    payload_len = pkt_len - pad_len - 1
+    if payload_len < 1:   # malformed padding_length -> no usable payload
+        return None
+    return bytes(buf[5:5 + payload_len])
 
 
 def _name_lists(payload: bytes) -> list[list[str]] | None:
@@ -217,7 +219,7 @@ def probe(host: str, port: int = 22, timeout: float = 8.0) -> SSHObservation:
                     obs.encryption_algorithms = lists[2]
                     obs.mac_algorithms = lists[4]
                     break
-    except (OSError, socket.timeout) as exc:
+    except Exception as exc:  # noqa: BLE001 — probe must never raise
         obs.error = f"{type(exc).__name__}: {exc}"
     return obs
 
@@ -258,7 +260,7 @@ def scan(host: str, port: int = 22, timeout: float = 8.0) -> list[Finding]:
             findings.append(f)
         # A '-sha1' KEX transcript or ssh-rsa (SHA-1 signature) also surfaces a
         # SHA-1 legacy finding — the deprecated hash, distinct from the primitive.
-        if algo.endswith("-sha1") or algo == "ssh-rsa" or "sha1" in algo:
+        if algo.endswith("-sha1") or algo.startswith("ssh-rsa") or "sha1" in algo:
             s = classify("SHA-1", AssetType.SSH_ENDPOINT, locator,
                          evidence=f"{algo} (SHA-1)",
                          extra={"role": role + "-hash", "banner": obs.banner})

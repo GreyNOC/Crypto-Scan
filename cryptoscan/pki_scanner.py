@@ -19,7 +19,7 @@ from pathlib import Path
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import (
-    rsa, ec, dsa, ed25519, ed448)
+    rsa, ec, dsa, ed25519, ed448, x25519, x448, dh)
 from cryptography.hazmat.primitives.serialization import pkcs7
 
 from .classifier import Finding, AssetType, classify
@@ -41,6 +41,13 @@ def _key_token(pubkey) -> tuple[str, str | None]:
         return "EdDSA", "ed448"
     if isinstance(pubkey, dsa.DSAPublicKey):
         return "DSA", str(pubkey.key_size)
+    # Key-agreement key files are HNDL crown jewels — must not be dropped.
+    if isinstance(pubkey, x25519.X25519PublicKey):
+        return "X25519", "x25519"
+    if isinstance(pubkey, x448.X448PublicKey):
+        return "X448", "x448"
+    if isinstance(pubkey, dh.DHPublicKey):
+        return "DH", str(pubkey.key_size)
     return type(pubkey).__name__, None
 
 

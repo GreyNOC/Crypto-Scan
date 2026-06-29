@@ -161,6 +161,11 @@ _reg(CryptoFact("X25519", Primitive.KEY_AGREE, QuantumRisk.SHOR, 128, 0,
                 note="Montgomery-curve ECDH; ECDLP. Common TLS 1.3 default."),
      "curve25519")
 
+_reg(CryptoFact("X448", Primitive.KEY_AGREE, QuantumRisk.SHOR, 224, 0,
+                migrate_to=PQ_KEM,
+                note="Curve448 ECDH (RFC 7748); ECDLP. ~224-bit classical."),
+     "x448", "curve448")
+
 # --- Hybrid PQC key exchange (classical ECDHE + ML-KEM): PQ-safe -----------
 # Reported by name per group — a SecP256r1MLKEM768 handshake must not be
 # mislabeled X25519MLKEM768. The shared secret resists harvest-now-decrypt-later
