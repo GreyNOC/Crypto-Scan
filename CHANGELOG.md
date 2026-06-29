@@ -3,6 +3,33 @@
 All notable changes to GreyNOC CryptoScan are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.2] — cipher enumeration + SSH & PKI surfaces
+
+Closes the single-handshake cipher limitation and expands coverage beyond
+TLS + code/deps to SSH and certificate/key files.
+
+### Added
+- **Full TLS cipher-suite enumeration.** TLS 1.3 via the raw probe (each suite
+  offered alone) and TLS ≤1.2 via an `ssl.set_ciphers` exclusion loop. The scan
+  flags every primitive in the server's *accepted* set — so an accepted AES-128
+  or legacy SHA-1/3DES suite is reported even when a stronger suite is
+  negotiated — and the CBOM `protocol` asset lists the full set.
+- **SSH endpoint scanning** (`gs ssh`, `ssh_scanner.py`). Reads the cleartext
+  `SSH_MSG_KEXINIT` to enumerate the server's entire offered key-exchange /
+  host-key / cipher / MAC set, classifying each — including PQ hybrids
+  `sntrup761x25519` (RFC 9941), `mlkem768x25519`, `mlkem768nistp256`,
+  `mlkem1024nistp384`. Flags HNDL-exposed classical KEX, `ssh-rsa`→SHA-1, and
+  sub-112-bit DH groups. New `ssh-endpoint` asset type.
+- **PKI / certificate-file scanning** (`pki_scanner.py`, folded into `gs code`/
+  `gs scan`). Parses X.509 / PKCS#7 / private+public key files and classifies
+  each key + signature algorithm (e.g. an RSA-1024 cert → classically-weak).
+- New primitives: SNTRUP761X25519, MLKEM768NISTP256, MLKEM1024NISTP384 (SSH PQ
+  hybrids), UMAC and Poly1305 MACs; `--ssh` on the combined `scan`.
+
+### Notes
+- The `@amazon.com` Kyber draft KEX string was deliberately omitted after fact
+  verification flagged it as unattested — only IANA/RFC-attested SSH hybrids ship.
+
 ## [0.2.1] — packaging, QA hardening
 
 Adds the `gs` CLI and per-OS portable releases, and lands the fixes from a full

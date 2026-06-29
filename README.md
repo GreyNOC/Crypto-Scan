@@ -33,6 +33,16 @@ remediation by HNDL exposure.
   ClientHello/ServerHello probe reads the *actually negotiated* group (X25519,
   P-256, …) and detects post-quantum hybrids like **X25519MLKEM768**. This is the
   live harvest-now-decrypt-later signal, not an inference from the certificate.
+- **Full TLS cipher-suite enumeration** — probes the server's *entire accepted
+  set* (TLS 1.3 raw + TLS ≤1.2 exclusion loop), so an accepted AES-128 or legacy
+  SHA-1/3DES suite is flagged even when a stronger one is negotiated.
+- **SSH endpoint scanning** — reads the cleartext `SSH_MSG_KEXINIT` to enumerate
+  the server's **entire** offered key-exchange / host-key / cipher / MAC set,
+  including PQ hybrids (`sntrup761x25519`, `mlkem768x25519`). SSH key exchange is
+  a major HNDL surface, and KEXINIT is pre-authentication.
+- **PKI / certificate-file discovery** — parses X.509 / PKCS#7 / key files
+  (`.pem`/`.crt`/`.cer`/`.der`/`.p7b`/`.key`/…) in a tree and classifies each
+  key + signature algorithm (real crypto artifacts, not pattern guesses).
 - **TLS / certificate discovery** — authorized handshake; negotiated protocol +
   cipher suite + the leaf certificate's key algorithm, size, curve, validity, and
   signature algorithm.
@@ -87,15 +97,17 @@ pip install -e ".[validation]"           # optional: CBOM strict-schema self-val
 ## Usage
 
 ```bash
-# TLS endpoint(s)
-python -m cryptoscan.cli tls example.com:443 api.example.com:443 \
-    --cbom cbom.json --report report.md
+# TLS endpoint(s) — negotiated group + full accepted cipher-suite set
+gs tls example.com:443 api.example.com:443 --cbom cbom.json --report report.md
 
-# Source / dependency tree
-python -m cryptoscan.cli code ./my-repo --report report.md --json findings.json
+# SSH endpoint(s) — enumerate the full offered KEX/host-key/cipher/MAC set
+gs ssh example.com github.com:22 --report report.md
 
-# Combined, with the Mosca risk engine and all outputs
-python -m cryptoscan.cli scan ./my-repo --tls example.com:443 \
+# Source / dependency / certificate tree
+gs code ./my-repo --report report.md --json findings.json
+
+# Combined (code + PKI + TLS + SSH), Mosca engine, all outputs
+gs scan ./my-repo --tls example.com:443 --ssh example.com \
     --cbom cbom.json --report report.md --json findings.json --sarif out.sarif \
     --mosca --z-scenario expected
 
@@ -130,18 +142,16 @@ diffable across scans and operating systems.
 
 ## Scope & limitations
 
-Stated plainly, because the no-fabrication standard cuts both ways. These are
-current as of v0.2.1 (unchanged by it), split into gaps we intend to close and
-properties that are deliberate.
+Stated plainly, because the no-fabrication standard cuts both ways. Current as of
+v0.2.2, split into gaps we intend to close and properties that are deliberate.
 
 **Roadmap gaps (open, will be addressed):**
 
-- **Cipher-suite enumeration is single-handshake.** The TLS probe reports the
-  *negotiated* suite, not the server's full accepted set. (The key-exchange
-  *group* probe already enumerates hybrid support across multiple offers; the
-  same multi-offer approach for cipher suites is the next step.)
-- **Surface coverage is TLS + code/deps.** HSM, firmware, IPsec/SSH, S/MIME, and
-  traffic-capture surfaces are out of scope today (see Roadmap).
+- **IPsec/IKEv2 discovery** — a UDP IKE SA-proposal probe is feasible but not yet
+  built.
+- **HSM, firmware, and traffic-capture surfaces** — genuinely need different
+  tooling (PKCS#11 / binary RE / pcap), so they are out of scope for this
+  in-process probe-and-file tool rather than faked.
 
 **By design (intentional, not defects):**
 
@@ -154,10 +164,10 @@ properties that are deliberate.
 
 ## Roadmap
 
-1. ~~TLS 1.3 `supported_groups` probe~~ ✓ · full cipher-suite enumeration.
-2. SSH / IPsec / S-MIME surfaces.
-3. ~~Continuous re-scan + posture diffing~~ ✓ (`cryptoscan diff`).
-4. ~~Hybrid-readiness checks (X25519MLKEM768)~~ ✓.
+1. ~~TLS 1.3 `supported_groups` probe~~ ✓ · ~~full cipher-suite enumeration~~ ✓.
+2. ~~SSH~~ ✓ · ~~S/MIME (cert/key files)~~ ✓ · IPsec/IKEv2 surface (next).
+3. ~~Continuous re-scan + posture diffing~~ ✓ (`gs diff`).
+4. ~~Hybrid-readiness checks (X25519MLKEM768, sntrup761x25519)~~ ✓.
 
 ## Layout
 
@@ -165,17 +175,19 @@ properties that are deliberate.
 cryptoscan/
   primitives.py   crypto knowledge base (risk truth, strength tables, JOSE/COSE)
   classifier.py   Finding model + context- and parameter-aware severity
-  tls_scanner.py  TLS / cert discovery
-  tls13_probe.py  live TLS 1.3 ClientHello/ServerHello group + PQC-hybrid probe
+  tls_scanner.py  TLS / cert discovery + cipher-suite enumeration
+  tls13_probe.py  live TLS 1.3 group + PQC-hybrid + cipher-suite probe
+  ssh_scanner.py  SSH KEXINIT algorithm-set enumeration
   code_scanner.py source + 7-ecosystem dependency discovery
+  pki_scanner.py  X.509 / PKCS#7 / key-file discovery
   mosca.py        Mosca X+Y>Z risk engine
   cbom.py         CycloneDX 1.6 CBOM emitter (algorithm/certificate/protocol)
   sarif.py        SARIF 2.1.0 emitter (GitHub code scanning)
   diff.py         posture diffing (assurance layer)
   report.py       Markdown posture report + Mosca horizon + roadmap
   cli.py          command-line entrypoint
-tests/            test_core.py (v0.1.0 regression) + test_v2.py (v0.2.0)
-sample-target/    deliberately mixed-crypto, multi-ecosystem fixture
+tests/            test_core.py (v0.1.0 regression) + test_v2.py + test_packaging.py
+sample-target/    deliberately mixed-crypto, multi-ecosystem fixture (+ pki/)
 ```
 
 ## Development

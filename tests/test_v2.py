@@ -829,6 +829,95 @@ def test_sarif_conforms_to_sarif_2_1_0_schema():
     jsonschema.validate(doc, schema)
 
 
+# --- SSH endpoint scanning -------------------------------------------------
+
+from cryptoscan import ssh_scanner as _ssh
+
+
+def _kexinit(kex, hostkey, enc, mac):
+    def nl(items):
+        s = ",".join(items).encode()
+        return struct.pack(">I", len(s)) + s
+    body = b"\x14" + b"\x00" * 16
+    for lst in (kex, hostkey, enc, enc, mac, mac, ["none"], ["none"], [], []):
+        body += nl(lst)
+    return body + b"\x00" + struct.pack(">I", 0)
+
+
+def test_every_ssh_algo_token_resolves():
+    for algo, (token, _role, _ke) in _ssh.SSH_ALGO_MAP.items():
+        assert lookup(token) is not None, (algo, token)
+
+
+def test_ssh_kexinit_name_list_parse():
+    p = _kexinit(["curve25519-sha256", "sntrup761x25519-sha512"],
+                 ["ssh-ed25519"], ["aes256-ctr"], ["hmac-sha2-256"])
+    lists = _ssh._name_lists(p)
+    assert lists[0] == ["curve25519-sha256", "sntrup761x25519-sha512"]
+    assert lists[1] == ["ssh-ed25519"] and lists[4] == ["hmac-sha2-256"]
+    assert _ssh._name_lists(b"\x01nope") is None      # not a KEXINIT
+
+
+def test_ssh_scan_classifies_offered_set(monkeypatch):
+    obs = _ssh.SSHObservation(
+        host="h", port=22, banner="SSH-2.0-OpenSSH_9.6",
+        kex_algorithms=["sntrup761x25519-sha512@openssh.com", "curve25519-sha256",
+                        "diffie-hellman-group1-sha1", "ext-info-s",
+                        "kex-strict-s-v00@openssh.com"],
+        host_key_algorithms=["ssh-ed25519", "ssh-rsa"],
+        encryption_algorithms=["chacha20-poly1305@openssh.com", "3des-cbc"],
+        mac_algorithms=["hmac-sha2-256", "hmac-md5", "umac-128@openssh.com"])
+    monkeypatch.setattr(_ssh, "probe", lambda *a, **k: obs)
+    fs = _ssh.scan("h", 22)
+    by = {(f.fact.name, f.extra.get("role")): f for f in fs}
+    assert by[("SNTRUP761X25519", "kex")].severity() is Severity.INFO
+    x = by[("X25519", "kex")]
+    assert x.hndl_exposed() and x.severity() is Severity.CRITICAL
+    assert by[("DH", "kex")].classical_weakness() is True        # group1 = 1024-bit
+    assert ("RSA", "hostkey") in by and ("SHA-1", "hostkey-hash") in by
+    assert ("3DES", "cipher") in by
+    assert ("HMAC", "mac") in by and ("MD5", "mac") in by and ("UMAC", "mac") in by
+    # Non-crypto KEXINIT markers are never scored.
+    assert not any("ext-info" in f.evidence or "kex-strict" in f.evidence
+                   for f in fs)
+
+
+def test_ssh_pq_hybrids_are_safe():
+    for token in ("SNTRUP761X25519", "MLKEM768NISTP256", "MLKEM1024NISTP384"):
+        f = classify(token, AssetType.SSH_ENDPOINT, "h:22", key_establishment=True)
+        assert f.fact.risk is QuantumRisk.SAFE and f.hndl_exposed() is False
+    assert lookup("mlkem768x25519") is lookup("x25519mlkem768")
+
+
+# --- PKI / certificate-file scanning ---------------------------------------
+
+def test_pki_scan_classifies_certs_and_keys(tmp_path):
+    import datetime
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa, ec
+    from cryptoscan import pki_scanner
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+    nm = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "weak.example")])
+    cert = (x509.CertificateBuilder().subject_name(nm).issuer_name(nm)
+            .public_key(key.public_key()).serial_number(1)
+            .not_valid_before(datetime.datetime(2024, 1, 1))
+            .not_valid_after(datetime.datetime(2026, 1, 1))
+            .sign(key, hashes.SHA256()))
+    (tmp_path / "c.crt").write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    eck = ec.generate_private_key(ec.SECP256R1())
+    (tmp_path / "s.key").write_bytes(eck.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()))
+
+    fs = pki_scanner.scan(tmp_path)
+    pairs = {(f.fact.name, f.classical_weakness()) for f in fs}
+    assert ("RSA", True) in pairs                  # RSA-1024 cert -> weak
+    assert any(f.fact.name == "ECDSA" for f in fs)  # EC key file
+
+
 if __name__ == "__main__":
     import inspect
     import traceback

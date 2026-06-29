@@ -184,6 +184,26 @@ _reg(CryptoFact("X25519Kyber768Draft00", Primitive.KEY_AGREE, QuantumRisk.SAFE, 
                 note=_HYBRID_NOTE + " OBSOLETE draft group; superseded by "
                      "X25519MLKEM768."),
      "x25519kyber768draft00", "x25519kyber768")
+# mlkem768x25519-sha256 (SSH) is the same ML-KEM-768 + X25519 primitive pair as
+# the TLS group; same risk class, distinct protocol artifact.
+REGISTRY["mlkem768x25519"] = REGISTRY["x25519mlkem768"]
+
+# SSH-specific PQ hybrid key exchange (distinct from the TLS groups above).
+_reg(CryptoFact("SNTRUP761X25519", Primitive.KEY_AGREE, QuantumRisk.SAFE, 128, 128,
+                standard="RFC 9941",
+                note="SSH hybrid KEX: Streamlined NTRU Prime (sntrup761) + "
+                     "X25519. PQ half is NTRU Prime, NOT ML-KEM/NIST. OpenSSH "
+                     "default since 9.0; resists harvest-now-decrypt-later."),
+     "sntrup761x25519-sha512", "sntrup761x25519-sha512@openssh.com",
+     "sntrup761x25519")
+_reg(CryptoFact("MLKEM768NISTP256", Primitive.KEY_AGREE, QuantumRisk.SAFE, 128, 128,
+                standard=_HYBRID_STD,
+                note="SSH hybrid KEX: ML-KEM-768 + ECDH P-256. "),
+     "mlkem768nistp256-sha256", "mlkem768nistp256")
+_reg(CryptoFact("MLKEM1024NISTP384", Primitive.KEY_AGREE, QuantumRisk.SAFE, 192, 192,
+                standard=_HYBRID_STD,
+                note="SSH hybrid KEX: ML-KEM-1024 + ECDH P-384. "),
+     "mlkem1024nistp384-sha384", "mlkem1024nistp384")
 
 # --- Symmetric / hash: Grover-weakened or safe -----------------------------
 _reg(CryptoFact("AES-128", Primitive.BLOCK_CIPHER, QuantumRisk.GROVER, 128, 64,
@@ -256,6 +276,17 @@ _reg(CryptoFact("HMAC", Primitive.MAC, QuantumRisk.SAFE, 256, 128,
                      "key; security is bounded by the key, not the digest."),
      "hmac", "hmac-sha256", "hmacsha256", "hmac-sha384", "hmac-sha512",
      "hs256", "hs384", "hs512")
+
+_reg(CryptoFact("Poly1305", Primitive.MAC, QuantumRisk.SAFE, 128, 128,
+                note="One-time authenticator (RFC 8439); the MAC half of "
+                     "ChaCha20-Poly1305. 128-bit tag; not quantum-broken."),
+     "poly1305")
+
+_reg(CryptoFact("UMAC", Primitive.MAC, QuantumRisk.SAFE, 128, 128,
+                note="Universal-hash MAC (RFC 4418), not HMAC. umac-128 is "
+                     "adequate; umac-64's 64-bit tag is below the modern "
+                     "integrity floor."),
+     "umac", "umac-128", "umac-128@openssh.com", "umac-64", "umac-64@openssh.com")
 
 # --- PQC standardized: safe ------------------------------------------------
 _reg(CryptoFact("ML-KEM", Primitive.PKE, QuantumRisk.SAFE,

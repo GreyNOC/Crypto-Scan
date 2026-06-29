@@ -19,9 +19,9 @@ from pathlib import Path
 from . import __version__
 from .classifier import Finding, summarize
 from .primitives import Severity
-from . import (tls_scanner, code_scanner, cbom as cbom_mod,
-               report as report_mod, sarif as sarif_mod, mosca as mosca_mod,
-               diff as diff_mod)
+from . import (tls_scanner, ssh_scanner, code_scanner, pki_scanner,
+               cbom as cbom_mod, report as report_mod, sarif as sarif_mod,
+               mosca as mosca_mod, diff as diff_mod)
 from .mosca import MoscaParameters, DataTier, ZScenario
 
 
@@ -121,14 +121,14 @@ def _run_diff(args) -> int:
     return code
 
 
-def _parse_target(t: str) -> tuple[str, int]:
+def _parse_target(t: str, default_port: int = 443) -> tuple[str, int]:
     if ":" in t and not t.startswith("["):
         host, _, port = t.rpartition(":")
         try:
             return host, int(port)
         except ValueError:
             raise ValueError(f"bad target '{t}': port must be numeric")
-    return t, 443
+    return t, default_port
 
 
 def _run_tls(targets: list[str]) -> list[Finding]:
@@ -151,11 +151,36 @@ def _run_tls(targets: list[str]) -> list[Finding]:
     return findings
 
 
+def _run_ssh(targets: list[str]) -> list[Finding]:
+    findings: list[Finding] = []
+    for t in targets:
+        try:
+            host, port = _parse_target(t, default_port=22)
+        except ValueError as exc:
+            print(f"    ! skipping {exc}", file=sys.stderr)
+            continue
+        print(f"[*] SSH KEXINIT probe: {host}:{port}", file=sys.stderr)
+        obs = ssh_scanner.probe(host, port)
+        if obs.error and not obs.kex_algorithms:
+            print(f"    ! {obs.error}", file=sys.stderr)
+            continue
+        print(f"    {obs.banner} / kex={len(obs.kex_algorithms)} "
+              f"hostkey={len(obs.host_key_algorithms)} "
+              f"enc={len(obs.encryption_algorithms)}", file=sys.stderr)
+        findings.extend(ssh_scanner.scan(host, port))
+    return findings
+
+
 def _run_code(path: str) -> list[Finding]:
     print(f"[*] Static crypto discovery: {path}", file=sys.stderr)
     findings = code_scanner.scan(path)
-    print(f"    {len(findings)} crypto usage(s) found", file=sys.stderr)
-    return findings
+    pki = pki_scanner.scan(path)
+    if pki:
+        print(f"    {len(pki)} certificate/key artifact(s) found",
+              file=sys.stderr)
+    print(f"    {len(findings) + len(pki)} crypto usage(s) found",
+          file=sys.stderr)
+    return findings + pki
 
 
 def _emit(findings: list[Finding], target: str, args) -> int:
@@ -247,13 +272,18 @@ def main(argv: list[str] | None = None) -> int:
     sp_tls.add_argument("targets", nargs="+", metavar="HOST[:PORT]")
     _add_outputs(sp_tls)
 
+    sp_ssh = sub.add_parser("ssh", help="scan SSH endpoint(s) via KEXINIT")
+    sp_ssh.add_argument("targets", nargs="+", metavar="HOST[:PORT]")
+    _add_outputs(sp_ssh)
+
     sp_code = sub.add_parser("code", help="scan a source/dependency tree")
     sp_code.add_argument("path")
     _add_outputs(sp_code)
 
-    sp_scan = sub.add_parser("scan", help="combined code + TLS scan")
+    sp_scan = sub.add_parser("scan", help="combined code + TLS + SSH scan")
     sp_scan.add_argument("path")
     sp_scan.add_argument("--tls", nargs="+", default=[], metavar="HOST[:PORT]")
+    sp_scan.add_argument("--ssh", nargs="+", default=[], metavar="HOST[:PORT]")
     _add_outputs(sp_scan)
 
     sp_diff = sub.add_parser(
@@ -275,12 +305,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "tls":
         findings = _run_tls(args.targets)
         target = ", ".join(args.targets)
+    elif args.cmd == "ssh":
+        findings = _run_ssh(args.targets)
+        target = ", ".join(args.targets)
     elif args.cmd == "code":
         findings = _run_code(args.path)
         target = args.path
     else:  # scan
-        findings = _run_code(args.path) + _run_tls(args.tls)
-        target = f"{args.path}" + (f" + {', '.join(args.tls)}" if args.tls else "")
+        findings = _run_code(args.path) + _run_tls(args.tls) + _run_ssh(args.ssh)
+        extras = (([f", {', '.join(args.tls)}"] if args.tls else [])
+                  + ([f", {', '.join(args.ssh)}"] if args.ssh else []))
+        target = f"{args.path}" + "".join(extras)
 
     return _emit(findings, target, args)
 
