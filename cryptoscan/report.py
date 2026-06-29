@@ -29,12 +29,12 @@ def render(findings: list[Finding], target: str,
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines: list[str] = []
 
-    lines.append(f"# GreyNOC Cryptographic Posture Report")
+    lines.append("# GreyNOC Cryptographic Posture Report")
     lines.append("")
     lines.append(f"**Target:** `{target}`  ")
     lines.append(f"**Generated:** {now}  ")
     lines.append(f"**Scanner:** GreyNOC CryptoScan v{__version__}  ")
-    lines.append(f"**Discipline:** authorized-testing-only · reproducible · no-fabrication")
+    lines.append("**Discipline:** authorized-testing-only · reproducible · no-fabrication")
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -106,8 +106,8 @@ def render(findings: list[Finding], target: str,
             lines.append(f"- **Target:** {info['target']}")
             if info["note"]:
                 lines.append(f"- **Rationale:** {info['note']}")
-            lines.append(f"- **Locations:** "
-                         + ", ".join(f"`{l}`" for l in info['locations'][:8])
+            lines.append("- **Locations:** "
+                         + ", ".join(f"`{loc}`" for loc in info['locations'][:8])
                          + (" …" if len(info['locations']) > 8 else ""))
             lines.append("")
 

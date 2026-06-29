@@ -374,8 +374,7 @@ def test_malformed_manifest_does_not_crash_scan(tmp_path):
 
 # --- Mosca risk engine -----------------------------------------------------
 
-from cryptoscan import mosca
-from cryptoscan.mosca import (MoscaParameters, DataTier, ZScenario, Urgency,
+from cryptoscan.mosca import (MoscaParameters, DataTier, Urgency,
                               assess, assess_posture, mosca_summary)
 
 

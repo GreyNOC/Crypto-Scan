@@ -99,7 +99,7 @@ def test_code_scanner_finds_mixed_crypto():
         assert expected in names, f"missing {expected} in {names}"
     # dependency pass picks up node-rsa / ecdsa / pynacl
     dep_locs = {f.locator for f in findings if f.asset_type is AssetType.DEPENDENCY}
-    assert any("node-rsa" in l for l in dep_locs)
+    assert any("node-rsa" in loc for loc in dep_locs)
 
 
 def test_registry_has_no_orphan_aliases():
