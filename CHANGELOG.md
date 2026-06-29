@@ -3,6 +3,35 @@
 All notable changes to GreyNOC CryptoScan are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.1] — packaging, QA hardening
+
+Adds the `gs` CLI and per-OS portable releases, and lands the fixes from a full
+multi-agent QA/QC pass. No change to scan semantics except the bug fixes below.
+
+### Added
+- **`gs` and `gscan` CLI commands** (short GreyNOC-Scan syntax) alongside
+  `cryptoscan`, and a self-contained **portable `gs` executable** (PyInstaller,
+  no Python required).
+- **Release workflow** (`.github/workflows/release.yml`): on a `v*` tag, builds
+  the wheel + sdist and a portable for linux-x64 / macos-arm64 / windows-x64,
+  smoke-tests each binary, and publishes them with `SHA256SUMS.txt`. Refuses to
+  publish if the tag doesn't match the package version or the CHANGELOG has no
+  matching section.
+- A ruff lint config; the tree is lint-clean.
+
+### Fixed
+- **Posture-diff assurance gate.** A relocated source finding that *also*
+  escalates (higher severity, or newly HNDL-exposed) is now reported as a
+  REGRESSION instead of being absorbed as a posture-neutral move — so
+  `gs diff` exits 2 on a genuine regression.
+- **CBOM `nistQuantumSecurityLevel` for hybrid groups.** SecP384r1MLKEM1024 now
+  maps to category 5 (was 3); category is derived from the fact's quantum
+  strength when no parameter-set token is present.
+- **Robustness / hardening:** reject `pom.xml` declaring a DTD/entities
+  (billion-laughs DoS) and cap manifest size; skip special files (FIFO/device)
+  in both scan passes; clamp the TLS SNI and make the TLS 1.3 probe never raise;
+  tolerate a partial Mosca `secrecy_years` override.
+
 ## [0.2.0] — the decision-engine release
 
 The leap from inventory tool to decision engine. Default output (no new flags)
