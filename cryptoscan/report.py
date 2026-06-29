@@ -23,7 +23,8 @@ def _bar(score: int, width: int = 20) -> str:
     return "#" * filled + "-" * (width - filled)
 
 
-def render(findings: list[Finding], target: str) -> str:
+def render(findings: list[Finding], target: str,
+           mosca: dict | None = None) -> str:
     s = summarize(findings)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines: list[str] = []
@@ -55,6 +56,9 @@ def render(findings: list[Finding], target: str) -> str:
                  f"CRITICAL: {sev['CRITICAL']} · HIGH: {sev['HIGH']} · "
                  f"MEDIUM: {sev['MEDIUM']} · LOW: {sev['LOW']} · INFO: {sev['INFO']}")
     lines.append("")
+
+    if mosca:
+        lines.extend(_mosca_section(mosca))
 
     # HNDL crown jewels
     hndl = [f for f in findings if f.hndl_exposed()]
@@ -114,6 +118,58 @@ def render(findings: list[Finding], target: str) -> str:
                  "locator. Crypto-agility is the durable control — design "
                  "replacements behind an abstraction so the next migration is cheap.")
     return "\n".join(lines)
+
+
+def _mosca_section(m: dict) -> list[str]:
+    """Render the Mosca risk-horizon section from a mosca_summary() dict."""
+    posture = m["posture"]
+    params = m["parameters"]
+    sens = m["scenario_sensitivity_violated"]
+    default_tier = params["default_tier"]
+    x = params["secrecy_years"].get(default_tier, "?")
+    y = params["migration_years"]
+    z = params["crqc_years"].get(m["scenario"], "?")
+    lines = [
+        "## Quantum risk horizon — Mosca's theorem",
+        "",
+        "Mosca's inequality **X + Y > Z**: if data secrecy lifetime (X) plus "
+        "migration time (Y) exceeds the years until a quantum computer breaks "
+        "today's key exchange (Z), traffic sent now is already harvestable "
+        "(harvest-now-decrypt-later).",
+        "",
+        f"- **Scenario:** {m['scenario']} — assumed CRQC in ~{z} yr "
+        f"(collapse ≈ {posture['collapse_year']})",
+        f"- **Assumptions:** X(`{default_tier}`)={x} yr · Y={y} yr · Z={z} yr "
+        f"— *all overridable*",
+        f"- **Verdict:** **{posture['worst_urgency']}** — "
+        f"{posture['violated']} of {posture['hndl_findings']} HNDL-exposed "
+        f"asset(s) already violate the inequality "
+        f"(max exposure {posture['max_exposure_years']} yr)",
+        f"- **Scenario sensitivity** (assets already exposed): "
+        f"low {sens['low']} · expected {sens['expected']} · high {sens['high']}",
+        "",
+    ]
+    act, seen = [], set()
+    for v in posture["verdicts"]:
+        if not v["inequality_violated"]:
+            continue
+        key = (v["algorithm"], v["locator"])
+        if key in seen:
+            continue
+        seen.add(key)
+        act.append(v)
+    if act:
+        lines.append("| Urgency | Algorithm | Where | X+Y vs Z | Exposure (yr) |")
+        lines.append("|---|---|---|---|---|")
+        for v in sorted(act, key=lambda d: -d["exposure_years"])[:12]:
+            xy = v["x_secrecy_years"] + v["y_migration_years"]
+            lines.append(
+                f"| {v['urgency']} | {v['algorithm']} | `{v['locator']}` | "
+                f"{xy} > {v['z_crqc_years']} | {v['exposure_years']} |")
+        lines.append("")
+    lines.append(f"> Basis: {m['basis']['model']} {m['basis']['crqc_years']}")
+    lines.append("")
+    return lines
 
 
 def _dedupe(findings: list[Finding]) -> list[Finding]:

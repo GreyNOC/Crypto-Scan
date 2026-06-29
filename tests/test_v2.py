@@ -343,6 +343,85 @@ def test_malformed_manifest_does_not_crash_scan(tmp_path):
     assert isinstance(fs, list)
 
 
+# --- Mosca risk engine -----------------------------------------------------
+
+from cryptoscan import mosca
+from cryptoscan.mosca import (MoscaParameters, DataTier, ZScenario, Urgency,
+                              assess, assess_posture, mosca_summary)
+
+
+def _ecdh(extra=None):
+    return classify("ECDH", AssetType.TLS_ENDPOINT, "h:443",
+                    key_establishment=True, extra=extra or {})
+
+
+def test_mosca_inequality_violated_act_now():
+    # X(confidential)=10, Y=7, Z(expected)=12 -> 17 > 12 -> violated, exposure 5.
+    v = assess(_ecdh(), now_year=2026)
+    assert v.inequality_violated is True
+    assert v.urgency is Urgency.ACT_NOW
+    assert v.exposure_years == 5
+    assert v.collapse_year == 2038       # 2026 + Z(12)
+
+
+def test_mosca_plan_vs_monitor_boundary():
+    plan = MoscaParameters.from_overrides(crqc_expected=20)   # slack 3
+    assert assess(_ecdh(), params=plan, now_year=2026).urgency is Urgency.PLAN
+    mon = MoscaParameters.from_overrides(crqc_expected=21)    # slack 4
+    assert assess(_ecdh(), params=mon, now_year=2026).urgency is Urgency.MONITOR
+
+
+def test_mosca_not_exposed_for_non_hndl():
+    sig = classify("RSA", AssetType.CERTIFICATE, "h:443")     # auth, not HNDL
+    aes = classify("AES-128", AssetType.TLS_ENDPOINT, "h:443")
+    assert assess(sig, now_year=2026).urgency is Urgency.NOT_EXPOSED
+    assert assess(aes, now_year=2026).urgency is Urgency.NOT_EXPOSED
+
+
+def test_mosca_tier_override_via_extra():
+    v = assess(_ecdh(extra={"data_tier": "transient"}), now_year=2026)
+    assert v.tier is DataTier.TRANSIENT
+    assert v.x_secrecy_years == 1
+    assert v.inequality_violated is False     # 1+7=8 < 12
+    assert v.urgency is Urgency.MONITOR
+
+
+def test_mosca_from_overrides_flips_verdict_and_keeps_basis():
+    finding = _ecdh(extra={"data_tier": "transient"})
+    assert assess(finding, now_year=2026).urgency is Urgency.MONITOR
+    aggressive = MoscaParameters.from_overrides(crqc_expected=5)  # Z=5
+    assert assess(finding, params=aggressive,
+                  now_year=2026).urgency is Urgency.ACT_NOW
+    assert "model" in aggressive.basis()
+
+
+def test_mosca_now_year_is_deterministic_at_both_layers():
+    v1 = assess(_ecdh(), now_year=2030)
+    v2 = assess(_ecdh(), now_year=2030)
+    assert v1.collapse_year == v2.collapse_year == 2042
+    p = assess_posture([_ecdh()], now_year=2030)
+    assert p["collapse_year"] == 2042
+
+
+def test_mosca_scenario_sensitivity_is_monotonic():
+    s = mosca_summary([_ecdh()], now_year=2026)
+    sens = s["scenario_sensitivity_violated"]
+    assert sens["low"] >= sens["expected"] >= sens["high"]
+    assert sens["high"] == 0          # 17 < 20
+    assert s["posture"]["worst_urgency"] == "ACT-NOW"
+
+
+def test_report_mosca_section_is_opt_in():
+    from cryptoscan import report as report_mod
+    findings = [_ecdh()]
+    plain = report_mod.render(findings, "t")
+    assert "Mosca" not in plain                    # default: v0.1.0-shaped
+    m = mosca_summary(findings, now_year=2026)
+    withm = report_mod.render(findings, "t", mosca=m)
+    assert "Quantum risk horizon" in withm
+    assert "X + Y > Z" in withm
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
