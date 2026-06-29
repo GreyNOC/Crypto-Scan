@@ -128,20 +128,29 @@ Each finding carries a stable `fingerprint` (sha256 of asset+locator+algo+eviden
 and a `locator` normalized to POSIX separators, so results are reproducible and
 diffable across scans and operating systems.
 
-## Known limitations
+## Scope & limitations
 
-Stated plainly, because the no-fabrication standard cuts both ways:
+Stated plainly, because the no-fabrication standard cuts both ways. These are
+current as of v0.2.1 (unchanged by it), split into gaps we intend to close and
+properties that are deliberate.
+
+**Roadmap gaps (open, will be addressed):**
 
 - **Cipher-suite enumeration is single-handshake.** The TLS probe reports the
   *negotiated* suite, not the server's full accepted set. (The key-exchange
-  *group* probe does enumerate hybrid support across multiple offers.)
-- **Source scan is pattern-based**, so it favors recall over precision; treat
-  source findings as leads to confirm, not proof of exploitable config.
+  *group* probe already enumerates hybrid support across multiple offers; the
+  same multi-offer approach for cipher suites is the next step.)
+- **Surface coverage is TLS + code/deps.** HSM, firmware, IPsec/SSH, S/MIME, and
+  traffic-capture surfaces are out of scope today (see Roadmap).
+
+**By design (intentional, not defects):**
+
+- **Source scan is pattern-based** — it favors recall over precision, so treat
+  source findings as leads to confirm, not proof of exploitable config. (A
+  semantic/AST pass could raise precision but is a different tool.)
 - **Mosca X/Y/Z are assumptions, not measurements.** The defaults are labeled,
   cited (`mosca.MoscaParameters.basis()`), and overridable — the engine asserts
-  the arithmetic, not the future.
-- Coverage is TLS + code/deps. HSM, firmware, IPsec/SSH, and traffic-capture
-  surfaces remain out of scope.
+  the arithmetic, not the future. This is honesty, not a bug to fix.
 
 ## Roadmap
 
