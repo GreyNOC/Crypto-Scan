@@ -17,7 +17,8 @@ import hashlib
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
-from .primitives import CryptoFact, Primitive, QuantumRisk, Severity, lookup
+from .primitives import (CryptoFact, Primitive, QuantumRisk, Severity,
+                         lookup, strength_for)
 
 
 class AssetType(str, Enum):
@@ -45,8 +46,30 @@ class Finding:
         #   key establishment  -> CRITICAL (HNDL: harvestable today)
         #   signature / auth    -> HIGH     (forgery / identity risk, not HNDL)
         if self.fact.risk is QuantumRisk.SHOR:
-            return Severity.CRITICAL if self._is_key_establishment() else Severity.HIGH
-        return self.fact.severity()
+            base = Severity.CRITICAL if self._is_key_establishment() else Severity.HIGH
+        else:
+            base = self.fact.severity()
+        # Parameter-aware floor: a sub-112-bit key/curve (e.g. RSA-1024,
+        # secp192r1) is already broken *classically*, independent of quantum, so
+        # it can never rank below HIGH (CRITICAL if it establishes keys).
+        if self._param_weak():
+            floor = (Severity.CRITICAL if self._is_key_establishment()
+                     else Severity.HIGH)
+            if floor.rank > base.rank:
+                base = floor
+        return base
+
+    def _param_weak(self) -> bool:
+        _, label = strength_for(self.fact.name, self.parameter)
+        return label == "weak"
+
+    def classical_weakness(self) -> bool:
+        """True if this primitive is broken/deprecated by *classical*
+        cryptanalysis — a LEGACY algorithm (MD5/SHA-1/3DES/RC4) or a sub-112-bit
+        key/curve — independent of any quantum threat."""
+        if self.fact.risk is QuantumRisk.LEGACY:
+            return True
+        return self._param_weak()
 
     def _is_key_establishment(self) -> bool:
         # Key-agreement primitives are always key establishment. Public-key
@@ -76,6 +99,7 @@ class Finding:
             "quantum_risk": self.fact.risk.value,
             "severity": self.severity().value,
             "hndl_exposed": self.hndl_exposed(),
+            "classically_weak": self.classical_weakness(),
             "asset_type": self.asset_type.value,
             "locator": self.locator,
             "evidence": self.evidence,

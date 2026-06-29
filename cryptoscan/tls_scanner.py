@@ -22,6 +22,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import rsa, ec, dsa, ed25519, ed448
 
 from .classifier import Finding, AssetType, classify
+from . import tls13_probe
 
 
 @dataclass
@@ -34,6 +35,8 @@ class TLSObservation:
     cert_subject: str | None = None
     cert_issuer: str | None = None
     cert_sig_algo: str | None = None
+    cert_not_before: str | None = None
+    cert_not_after: str | None = None
     key_algo: str | None = None
     key_size: int | None = None
     key_curve: str | None = None
@@ -85,6 +88,25 @@ def _cipher_tokens(cipher_name: str) -> list[tuple[str, str]]:
     return tokens
 
 
+def _cert_validity(cert: x509.Certificate) -> tuple[str | None, str | None]:
+    """ISO-8601 notBefore/notAfter. Prefers the tz-aware accessors added in
+    cryptography 42; falls back to the deprecated naive ones on older libs."""
+    def _iso(aware_attr: str, naive_attr: str) -> str | None:
+        try:
+            dt = getattr(cert, aware_attr)
+        except AttributeError:
+            try:
+                dt = getattr(cert, naive_attr)
+            except Exception:
+                return None
+        try:
+            return dt.isoformat()
+        except Exception:
+            return None
+    return (_iso("not_valid_before_utc", "not_valid_before"),
+            _iso("not_valid_after_utc", "not_valid_after"))
+
+
 def _key_details(cert: x509.Certificate) -> tuple[str, int | None, str | None]:
     pk = cert.public_key()
     if isinstance(pk, rsa.RSAPublicKey):
@@ -126,6 +148,7 @@ def probe(host: str, port: int = 443, timeout: float = 8.0) -> TLSObservation:
                         obs.cert_sig_algo = cert.signature_algorithm_oid._name
                     except Exception:
                         obs.cert_sig_algo = None
+                    obs.cert_not_before, obs.cert_not_after = _cert_validity(cert)
                     obs.key_algo, obs.key_size, obs.key_curve = _key_details(cert)
     except Exception as exc:  # noqa: BLE001 — report, don't crash the scan
         obs.error = f"{type(exc).__name__}: {exc}"
@@ -156,15 +179,19 @@ def scan(host: str, port: int = 443, timeout: float = 8.0) -> list[Finding]:
             if f:
                 findings.append(f)
 
-    # Certificate public key (authentication / identity).
+    # Certificate public key (authentication / identity). Pass the curve name
+    # as the strength parameter for EC keys (so a sub-112-bit curve escalates),
+    # and the modulus size for RSA/DSA.
     if obs.key_algo:
         f = classify(
             obs.key_algo, AssetType.CERTIFICATE, locator,
             evidence=f"{obs.key_algo}-{obs.key_size or '?'}"
                      f"{'/' + obs.key_curve if obs.key_curve else ''}",
-            parameter=str(obs.key_size) if obs.key_size else obs.key_curve,
+            parameter=obs.key_curve or (str(obs.key_size) if obs.key_size else None),
             extra={"subject": obs.cert_subject, "issuer": obs.cert_issuer,
-                   "curve": obs.key_curve},
+                   "curve": obs.key_curve, "key_size": obs.key_size,
+                   "not_before": obs.cert_not_before,
+                   "not_after": obs.cert_not_after},
         )
         if f:
             findings.append(f)
@@ -175,6 +202,27 @@ def scan(host: str, port: int = 443, timeout: float = 8.0) -> list[Finding]:
             obs.cert_sig_algo, AssetType.CERTIFICATE, locator,
             evidence=obs.cert_sig_algo,
             extra={"role": "cert-signature", "subject": obs.cert_subject},
+        )
+        if f:
+            findings.append(f)
+
+    # TLS 1.3 negotiated key-exchange group — the live HNDL signal v0.1.0 could
+    # not see, plus PQC-hybrid readiness. Best-effort; never fails the scan.
+    try:
+        g = tls13_probe.probe(host, port, timeout)
+    except Exception:  # noqa: BLE001 — probe is advisory
+        g = None
+    if g is not None and g.negotiated_group is not None:
+        ng = g.negotiated_group
+        f = classify(
+            ng.classifier_token, AssetType.TLS_ENDPOINT, locator,
+            evidence=ng.name,
+            key_establishment=True,
+            parameter=ng.curve_parameter,
+            extra={"protocol": "TLSv1.3", "role": "kex-group",
+                   "group_code": f"0x{int(ng):04X}",
+                   "pqc_hybrid": ng.is_hybrid_pqc,
+                   "supports_pqc_hybrid": g.supports_pqc_hybrid},
         )
         if f:
             findings.append(f)

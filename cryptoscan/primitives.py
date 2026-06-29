@@ -156,9 +156,34 @@ _reg(CryptoFact("DSA", Primitive.SIGNATURE, QuantumRisk.SHOR, 112, 0,
                 note="Finite-field DSA; discrete log. Also deprecated by NIST."))
 
 _reg(CryptoFact("X25519", Primitive.KEY_AGREE, QuantumRisk.SHOR, 128, 0,
-                migrate_to=("X25519MLKEM768 hybrid (RFC 9370 style)",) + PQ_KEM,
+                migrate_to=("X25519MLKEM768 hybrid (draft-ietf-tls-ecdhe-mlkem)",)
+                + PQ_KEM,
                 note="Montgomery-curve ECDH; ECDLP. Common TLS 1.3 default."),
-     "x25519kyber768", "curve25519")
+     "curve25519")
+
+# --- Hybrid PQC key exchange (classical ECDHE + ML-KEM): PQ-safe -----------
+# Reported by name per group — a SecP256r1MLKEM768 handshake must not be
+# mislabeled X25519MLKEM768. The shared secret resists harvest-now-decrypt-later
+# because the ML-KEM half holds even though the classical half is Shor-broken.
+_HYBRID_NOTE = ("Hybrid TLS 1.3 key exchange (classical ECDHE + ML-KEM). The "
+                "ML-KEM half defeats harvest-now-decrypt-later; the classical "
+                "half alone is Shor-broken.")
+_HYBRID_STD = "FIPS 203 + draft-ietf-tls-ecdhe-mlkem"
+
+_reg(CryptoFact("X25519MLKEM768", Primitive.KEY_AGREE, QuantumRisk.SAFE, 128, 128,
+                standard=_HYBRID_STD, note=_HYBRID_NOTE),
+     "x25519mlkem768")
+_reg(CryptoFact("SecP256r1MLKEM768", Primitive.KEY_AGREE, QuantumRisk.SAFE, 128, 128,
+                standard=_HYBRID_STD, note=_HYBRID_NOTE),
+     "secp256r1mlkem768")
+_reg(CryptoFact("SecP384r1MLKEM1024", Primitive.KEY_AGREE, QuantumRisk.SAFE, 192, 192,
+                standard=_HYBRID_STD, note=_HYBRID_NOTE),
+     "secp384r1mlkem1024")
+_reg(CryptoFact("X25519Kyber768Draft00", Primitive.KEY_AGREE, QuantumRisk.SAFE, 128, 128,
+                standard="draft-tls-westerbaan-xyber768d00 (obsolete)",
+                note=_HYBRID_NOTE + " OBSOLETE draft group; superseded by "
+                     "X25519MLKEM768."),
+     "x25519kyber768draft00", "x25519kyber768")
 
 # --- Symmetric / hash: Grover-weakened or safe -----------------------------
 _reg(CryptoFact("AES-128", Primitive.BLOCK_CIPHER, QuantumRisk.GROVER, 128, 64,
@@ -225,6 +250,13 @@ _reg(CryptoFact("SHA3-512", Primitive.HASH, QuantumRisk.SAFE, 512, 256,
                 note="Keccak; adequate post-quantum."),
      "sha3-512", "sha3_512")
 
+# --- MAC -------------------------------------------------------------------
+_reg(CryptoFact("HMAC", Primitive.MAC, QuantumRisk.SAFE, 256, 128,
+                note="Keyed-hash MAC (RFC 2104). Quantum-adequate at >=256-bit "
+                     "key; security is bounded by the key, not the digest."),
+     "hmac", "hmac-sha256", "hmacsha256", "hmac-sha384", "hmac-sha512",
+     "hs256", "hs384", "hs512")
+
 # --- PQC standardized: safe ------------------------------------------------
 _reg(CryptoFact("ML-KEM", Primitive.PKE, QuantumRisk.SAFE,
                 standard="FIPS 203",
@@ -245,6 +277,135 @@ _reg(CryptoFact("FN-DSA", Primitive.SIGNATURE, QuantumRisk.SAFE,
                 standard="FIPS 206 (draft)",
                 note="FFT-lattice signature (Falcon)."),
      "falcon", "fn-dsa")
+
+
+# ---------------------------------------------------------------------------
+# Parameter strength tables. Used by the classifier to make severity
+# key-size / curve aware: a Shor-broken primitive at a sub-112-bit parameter is
+# *also* classically broken and must not be under-counted.
+# ---------------------------------------------------------------------------
+
+# RSA / finite-field DH / DSA modulus size (bits) -> comparable classical
+# security strength (bits). NIST SP 800-57 Part 1 Rev 5, Table 2.
+STRENGTH_BY_MODULUS: dict[int, int] = {
+    1024: 80, 2048: 112, 3072: 128, 7680: 192, 15360: 256,
+}
+# Tokens whose `parameter` is a numeric modulus size.
+MODULUS_TOKENS = frozenset({"RSA", "DH", "DSA"})
+
+# The classical-strength floor NIST treats as the minimum acceptable (112-bit,
+# e.g. RSA-2048 / P-224). At or above this is the "legacy floor"; below it is
+# classically weak.
+STRENGTH_FLOOR = 112
+
+# Elliptic curve -> (approx. classical security bits, field size note). Strength
+# is the Pollard-rho estimate ~ n/2 (NIST SP 800-186), consistent with the bits
+# already recorded on the ECDSA/ECDH/EdDSA facts above.
+CURVE_FACTS: dict[str, int] = {
+    "secp192r1": 96, "prime192v1": 96, "p-192": 96,
+    "secp224r1": 112, "p-224": 112,
+    "secp256r1": 128, "prime256v1": 128, "p-256": 128,
+    "secp384r1": 192, "p-384": 192,
+    "secp521r1": 256, "p-521": 256,
+    "secp256k1": 128,
+    "x25519": 128, "curve25519": 128,
+    "x448": 224,
+    "ed25519": 128, "ed448": 224,
+    "brainpoolp256r1": 128, "brainpoolp384r1": 192, "brainpoolp512r1": 256,
+}
+
+# PQC parameter set -> NIST security CATEGORY (1..5). FIPS 203/204/205, FIPS 206
+# (draft). ML-DSA-44 is category 2; the rest follow 1/3/5.
+PQC_PARAM_SETS: dict[str, int] = {
+    "ml-kem-512": 1, "ml-kem-768": 3, "ml-kem-1024": 5,
+    "ml-dsa-44": 2, "ml-dsa-65": 3, "ml-dsa-87": 5,
+    "slh-dsa-128s": 1, "slh-dsa-128f": 1,
+    "slh-dsa-192s": 3, "slh-dsa-192f": 3,
+    "slh-dsa-256s": 5, "slh-dsa-256f": 5,
+    "falcon-512": 1, "falcon-1024": 5,
+    "fn-dsa-512": 1, "fn-dsa-1024": 5,
+}
+
+# JOSE/COSE algorithm identifier -> registry token. RFC 7518 / 8037 / 8812.
+JOSE_COSE_ALGS: dict[str, str] = {
+    "rs256": "RSA", "rs384": "RSA", "rs512": "RSA",
+    "ps256": "RSA", "ps384": "RSA", "ps512": "RSA",
+    "rsa-oaep": "RSA", "rsa-oaep-256": "RSA", "rsa1_5": "RSA",
+    "es256": "ECDSA", "es384": "ECDSA", "es512": "ECDSA", "es256k": "ECDSA",
+    "eddsa": "EdDSA",
+    "ecdh-es": "ECDH",
+    "hs256": "HMAC", "hs384": "HMAC", "hs512": "HMAC",
+    "a128gcm": "AES-128", "a192gcm": "AES-192", "a256gcm": "AES-256",
+    "a128kw": "AES-128", "a256kw": "AES-256",
+    "a128cbc-hs256": "AES-128", "a256cbc-hs512": "AES-256",
+}
+
+
+def _modulus_strength(n: int) -> int:
+    """Comparable classical strength (bits) for an RSA/DH/DSA modulus of n bits.
+
+    Floors to the highest SP 800-57 row at or below n. A 4096-bit modulus lands
+    on the 3072 row (128); NIST does not publish a distinct row for it.
+    """
+    if n < 1024:
+        return 56  # well below any acceptable floor
+    bits = 80
+    for size, strength in sorted(STRENGTH_BY_MODULUS.items()):
+        if n >= size:
+            bits = strength
+        else:
+            break
+    return bits
+
+
+def strength_for(token: str, parameter: str | int | None) -> tuple[int | None, str]:
+    """Resolve a (token, parameter) to (classical_bits, label).
+
+    Dispatch is on parameter SHAPE, not token name:
+      numeric + modulus token -> SP 800-57 modulus table,
+      curve name              -> CURVE_FACTS.
+    label: 'weak' (< 112-bit), 'floor' (== 112-bit), '' otherwise/unknown.
+    """
+    if parameter is None:
+        return None, ""
+    p = str(parameter).strip()
+    if not p:
+        return None, ""
+    bits: int | None = None
+    if p.isdigit():
+        if token and token.upper() in MODULUS_TOKENS:
+            bits = _modulus_strength(int(p))
+    else:
+        bits = CURVE_FACTS.get(p.lower())
+    if bits is None:
+        return None, ""
+    if bits < STRENGTH_FLOOR:
+        return bits, "weak"
+    if bits == STRENGTH_FLOOR:
+        return bits, "floor"
+    return bits, ""
+
+
+def curve_fact(name: str) -> int | None:
+    """Classical security bits for a named curve, or None if unknown."""
+    if not name:
+        return None
+    return CURVE_FACTS.get(name.strip().lower())
+
+
+def pqc_category(param_set: str) -> int | None:
+    """NIST security category (1..5) for a PQC parameter set, or None."""
+    if not param_set:
+        return None
+    return PQC_PARAM_SETS.get(param_set.strip().lower())
+
+
+def jose_alg(alg_id: str) -> CryptoFact | None:
+    """Resolve a JOSE/COSE algorithm id (e.g. 'ES256', 'A128GCM') to a fact."""
+    if not alg_id:
+        return None
+    token = JOSE_COSE_ALGS.get(alg_id.strip().lower())
+    return lookup(token) if token else None
 
 
 def lookup(token: str) -> CryptoFact | None:

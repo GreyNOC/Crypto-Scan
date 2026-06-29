@@ -193,6 +193,8 @@ def _greynoc_properties(f: Finding) -> list[dict]:
         {"name": "greynoc:quantumRisk", "value": f.fact.risk.value},
         {"name": "greynoc:severity", "value": f.severity().value},
         {"name": "greynoc:hndlExposed", "value": str(f.hndl_exposed()).lower()},
+        {"name": "greynoc:classicallyWeak",
+         "value": str(f.classical_weakness()).lower()},
         {"name": "greynoc:assetType", "value": f.asset_type.value},
         {"name": "greynoc:evidence", "value": f.evidence[:200]},
     ]
