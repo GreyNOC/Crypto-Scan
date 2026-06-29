@@ -6,9 +6,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cryptoscan.classifier import classify, summarize, AssetType
-from cryptoscan.primitives import QuantumRisk, Severity, lookup, all_facts
+from cryptoscan.primitives import QuantumRisk, Severity, Primitive, lookup, all_facts
 from cryptoscan import cbom as cbom_mod
 from cryptoscan import code_scanner
+from cryptoscan.cli import _gate
 
 
 def test_shor_kem_is_critical_and_hndl():
@@ -105,6 +106,46 @@ def test_registry_has_no_orphan_aliases():
     # every fact resolvable by its own canonical name
     for fact in all_facts():
         assert lookup(fact.name) is fact
+
+
+def test_chacha20_classified_by_name_not_aes():
+    # No-fabrication: a ChaCha20 suite must report as ChaCha20, not AES-256.
+    for token in ("chacha20", "chacha20-poly1305", "CHACHA20"):
+        fact = lookup(token)
+        assert fact is not None, token
+        assert fact.name == "ChaCha20"
+        assert fact.primitive is Primitive.STREAM_CIPHER
+        assert fact.risk is QuantumRisk.SAFE
+
+
+def test_sha3_is_distinct_from_sha512():
+    # SHA-3 must not be folded into the SHA-512 fact.
+    assert lookup("sha3-256").name == "SHA3-256"
+    assert lookup("sha3-512").name == "SHA3-512"
+    assert lookup("sha-512").name == "SHA-512"
+
+
+def test_locators_use_posix_separators_for_reproducibility():
+    # Fingerprints are sha256(locator|...); a backslash on Windows would make
+    # them differ from a POSIX scan of the same tree. Locators must be posix.
+    sample = Path(__file__).resolve().parents[1] / "sample-target"
+    findings = code_scanner.scan(sample)
+    assert findings
+    for f in findings:
+        assert "\\" not in f.locator, f.locator
+
+
+def test_fail_on_gate_thresholds():
+    # MEDIUM-only finding set.
+    s = summarize([classify("AES-128", AssetType.SOURCE, "x.py:1")])
+    assert _gate(s, "critical") == 0   # nothing at/above critical
+    assert _gate(s, "medium") == 2     # the AES-128 is MEDIUM
+    assert _gate(s, "none") == 0       # gate disabled
+    # CRITICAL finding trips every threshold except 'none'.
+    s2 = summarize([classify("ECDH", AssetType.TLS_ENDPOINT, "h:443",
+                             key_establishment=True)])
+    assert _gate(s2, "critical") == 2
+    assert _gate(s2, "none") == 0
 
 
 if __name__ == "__main__":

@@ -1,0 +1,23 @@
+GreyNOC CryptoScan — Proprietary License
+Copyright (c) GreyNOC. All rights reserved.
+
+This software and its source code are the proprietary and confidential property
+of GreyNOC. They are provided for authorized evaluation and internal use only.
+
+Without the prior written permission of GreyNOC, you may NOT:
+  - copy, redistribute, sublicense, sell, or publish this software or any part
+    of it;
+  - create derivative works from it; or
+  - reverse engineer it except to the extent that restriction is prohibited by
+    applicable law.
+
+Operational note: GreyNOC CryptoScan performs network and source-tree scanning.
+It is for AUTHORIZED TESTING ONLY. The operator is solely responsible for
+ensuring they have permission to scan any target.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL GREYNOC BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.tox/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Scanner outputs (don't commit generated CBOMs / reports / findings)
+cbom.json
+report.md
+findings.json
+*.cbom.json
+
+# Editor / OS / tooling
+.claude/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

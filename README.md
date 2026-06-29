@@ -1,5 +1,7 @@
 # GreyNOC CryptoScan
 
+[![CI](https://github.com/GreyNOC/Crypto-Scan/actions/workflows/ci.yml/badge.svg)](https://github.com/GreyNOC/Crypto-Scan/actions/workflows/ci.yml)
+
 **Cryptographic Posture Management & PQC migration scanner.**
 Discovers the cryptography actually in use across TLS endpoints and
 source/dependency trees, classifies each primitive's quantum risk, and emits a
@@ -79,9 +81,14 @@ python -m cryptoscan.cli code ./my-repo --report report.md --json findings.json
 # Combined
 python -m cryptoscan.cli scan ./my-repo --tls example.com:443 \
     --cbom cbom.json --report report.md --json findings.json
+
+# Gate CI on a chosen severity (default: critical)
+python -m cryptoscan.cli code ./my-repo --fail-on high      # fail on HIGH or worse
+python -m cryptoscan.cli code ./my-repo --fail-on none      # never fail (inventory only)
 ```
 
-Exit code is **2** when CRITICAL findings are present, so it gates CI.
+Exit code is **2** when findings at or above `--fail-on` (default **critical**)
+are present, so it gates CI; pass `--fail-on none` to only inventory.
 
 ## Outputs
 
@@ -130,3 +137,17 @@ cryptoscan/
 tests/            unit tests (logic + CBOM shape + live sample scan)
 sample-target/    deliberately mixed-crypto fixture
 ```
+
+## Development
+
+```bash
+pip install -e .          # installs the package + `cryptography`
+pip install pytest
+pytest -q tests/          # or: python tests/test_core.py
+```
+
+CI (GitHub Actions) runs the suite on Linux and Windows across Python 3.10 and
+3.13, smoke-tests the CLI against `sample-target/`, and asserts that finding
+locators stay OS-independent so fingerprints remain reproducible.
+
+See [CHANGELOG.md](CHANGELOG.md) for notable changes.

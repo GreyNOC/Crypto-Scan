@@ -105,10 +105,13 @@ def scan_source(root: Path) -> list[Finding]:
     findings: list[Finding] = []
     for path in _iter_source_files(root):
         try:
-            text = path.read_text(errors="ignore")
+            text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        rel = path.relative_to(root) if path.is_relative_to(root) else path
+        # as_posix() so locators (and thus fingerprints) are identical
+        # whether the scan runs on Windows or POSIX — reproducibility depends
+        # on it.
+        rel = (path.relative_to(root) if path.is_relative_to(root) else path).as_posix()
         for lineno, line in enumerate(text.splitlines(), 1):
             if len(line) > 1000:
                 line = line[:1000]
@@ -127,11 +130,11 @@ def scan_source(root: Path) -> list[Finding]:
 
 def _parse_requirements(path: Path) -> list[str]:
     names = []
-    for line in path.read_text(errors="ignore").splitlines():
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        name = re.split(r"[<>=!~\[ ]", line, 1)[0].strip().lower()
+        name = re.split(r"[<>=!~\[ @;]", line, maxsplit=1)[0].strip().lower()
         if name:
             names.append(name)
     return names
@@ -139,8 +142,10 @@ def _parse_requirements(path: Path) -> list[str]:
 
 def _parse_package_json(path: Path) -> list[str]:
     try:
-        data = json.loads(path.read_text(errors="ignore"))
+        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
     except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(data, dict):
         return []
     names = []
     for key in ("dependencies", "devDependencies", "optionalDependencies"):
@@ -150,7 +155,7 @@ def _parse_package_json(path: Path) -> list[str]:
 
 def _parse_cargo(path: Path) -> list[str]:
     names, in_deps = [], False
-    for line in path.read_text(errors="ignore").splitlines():
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         s = line.strip()
         if s.startswith("["):
             in_deps = "dependencies" in s
@@ -162,7 +167,7 @@ def _parse_cargo(path: Path) -> list[str]:
 
 def _parse_gomod(path: Path) -> list[str]:
     names = []
-    for line in path.read_text(errors="ignore").splitlines():
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         m = re.search(r"^\s*([\w./-]+)\s+v\d", line)
         if m:
             names.append(m.group(1).split("/")[-1].lower())
@@ -185,7 +190,7 @@ def scan_dependencies(root: Path) -> list[Finding]:
         parser = MANIFESTS.get(path.name.lower())
         if not parser:
             continue
-        rel = path.relative_to(root) if path.is_relative_to(root) else path
+        rel = (path.relative_to(root) if path.is_relative_to(root) else path).as_posix()
         try:
             names = parser(path)
         except OSError:

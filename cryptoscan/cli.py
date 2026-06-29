@@ -5,7 +5,8 @@ GreyNOC CryptoScan — command-line interface.
   cryptoscan code  <path>                    [--cbom out.json] [--report out.md]
   cryptoscan scan  <path> --tls host[:port]  [--cbom out.json] [--report out.md]
 
-Exit code is non-zero when CRITICAL findings are present, so it can gate CI.
+Exit code is 2 when findings at or above the --fail-on severity are present
+(default: critical), so it can gate CI; pass --fail-on none to never fail.
 """
 
 from __future__ import annotations
@@ -19,6 +20,42 @@ from . import __version__
 from .classifier import Finding, summarize
 from .primitives import Severity
 from . import tls_scanner, code_scanner, cbom as cbom_mod, report as report_mod
+
+
+# Severity threshold the scan fails CI on. "none" never fails.
+_GATE_CHOICES = ["critical", "high", "medium", "low", "none"]
+
+
+def _force_utf8() -> None:
+    """Emit UTF-8 regardless of the platform console codepage.
+
+    The report uses '·', '—' and '…'; on a legacy Windows console (cp1252)
+    an unconfigured stream raises UnicodeEncodeError or prints mojibake.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass  # already-wrapped / non-reconfigurable stream — leave as is
+
+
+def _write_text(path: str, text: str) -> None:
+    """Write UTF-8 with a trailing newline, independent of the OS locale."""
+    if not text.endswith("\n"):
+        text += "\n"
+    Path(path).write_text(text, encoding="utf-8")
+
+
+def _gate(summary: dict, fail_on: str) -> int:
+    """Exit 2 if any finding meets/exceeds the fail-on severity, else 0."""
+    if fail_on == "none":
+        return 0
+    threshold = Severity[fail_on.upper()].rank
+    by_sev = summary["by_severity"]
+    triggered = sum(
+        n for sev, n in by_sev.items() if Severity[sev].rank >= threshold
+    )
+    return 2 if triggered else 0
 
 
 def _parse_target(t: str) -> tuple[str, int]:
@@ -55,17 +92,17 @@ def _emit(findings: list[Finding], target: str, args) -> int:
     s = summarize(findings)
     if args.cbom:
         doc = cbom_mod.build_cbom(findings, target)
-        Path(args.cbom).write_text(json.dumps(doc, indent=2))
+        _write_text(args.cbom, json.dumps(doc, indent=2))
         print(f"[+] CBOM written: {args.cbom}  "
               f"({len(doc['components'])} components)", file=sys.stderr)
     if args.report:
         md = report_mod.render(findings, target)
-        Path(args.report).write_text(md)
+        _write_text(args.report, md)
         print(f"[+] Report written: {args.report}", file=sys.stderr)
     if args.json:
         out = {"target": target, "summary": s,
                "findings": [f.to_dict() for f in findings]}
-        Path(args.json).write_text(json.dumps(out, indent=2))
+        _write_text(args.json, json.dumps(out, indent=2))
         print(f"[+] JSON written: {args.json}", file=sys.stderr)
 
     # Console summary
@@ -78,7 +115,11 @@ def _emit(findings: list[Finding], target: str, args) -> int:
     print(f"CRITICAL {sev['CRITICAL']} · HIGH {sev['HIGH']} · "
           f"MEDIUM {sev['MEDIUM']} · LOW {sev['LOW']} · INFO {sev['INFO']}")
 
-    return 2 if sev["CRITICAL"] else 0
+    code = _gate(s, args.fail_on)
+    if code:
+        print(f"[gate] failing: findings at or above "
+              f"'{args.fail_on}' severity present", file=sys.stderr)
+    return code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -93,6 +134,10 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--cbom", metavar="FILE", help="write CycloneDX 1.6 CBOM")
         sp.add_argument("--report", metavar="FILE", help="write Markdown report")
         sp.add_argument("--json", metavar="FILE", help="write raw findings JSON")
+        sp.add_argument("--fail-on", choices=_GATE_CHOICES, default="critical",
+                        metavar="{critical,high,medium,low,none}",
+                        help="severity that makes the scan exit 2 to gate CI "
+                             "(default: critical)")
 
     sp_tls = sub.add_parser("tls", help="scan TLS endpoint(s)")
     sp_tls.add_argument("targets", nargs="+", metavar="HOST[:PORT]")
@@ -108,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_outputs(sp_scan)
 
     args = p.parse_args(argv)
+    _force_utf8()
 
     if args.cmd == "tls":
         findings = _run_tls(args.targets)

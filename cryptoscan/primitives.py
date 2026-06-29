@@ -173,8 +173,13 @@ _reg(CryptoFact("AES-192", Primitive.BLOCK_CIPHER, QuantumRisk.GROVER, 192, 96,
 
 _reg(CryptoFact("AES-256", Primitive.BLOCK_CIPHER, QuantumRisk.SAFE, 256, 128,
                 note="Grover -> ~128-bit effective; CNSA 2.0 approved."),
-     "aes256", "aes-256-gcm", "aes_256_gcm", "aes-256-cbc", "aes256-gcm",
-     "chacha20", "chacha20-poly1305")
+     "aes256", "aes-256-gcm", "aes_256_gcm", "aes-256-cbc", "aes256-gcm")
+
+# ChaCha20 is its own stream cipher — report it by name, never as AES-256.
+_reg(CryptoFact("ChaCha20", Primitive.STREAM_CIPHER, QuantumRisk.SAFE, 256, 128,
+                note="256-bit stream cipher; Grover -> ~128-bit. Not "
+                     "quantum-broken. ChaCha20-Poly1305 is a TLS 1.3 AEAD."),
+     "chacha20", "chacha20-poly1305", "chacha20poly1305")
 
 _reg(CryptoFact("3DES", Primitive.BLOCK_CIPHER, QuantumRisk.LEGACY, 112, 56,
                 migrate_to=("AES-256",),
@@ -209,7 +214,16 @@ _reg(CryptoFact("SHA-384", Primitive.HASH, QuantumRisk.SAFE, 384, 192,
 
 _reg(CryptoFact("SHA-512", Primitive.HASH, QuantumRisk.SAFE, 512, 256,
                 note="Adequate post-quantum."),
-     "sha512", "sha-512", "sha3-512", "sha3-256")
+     "sha512", "sha-512")
+
+# SHA-3 family — distinct primitive from SHA-2; don't fold into SHA-512.
+_reg(CryptoFact("SHA3-256", Primitive.HASH, QuantumRisk.SAFE, 256, 128,
+                note="Keccak; Grover preimage -> ~128-bit; adequate."),
+     "sha3-256", "sha3_256")
+
+_reg(CryptoFact("SHA3-512", Primitive.HASH, QuantumRisk.SAFE, 512, 256,
+                note="Keccak; adequate post-quantum."),
+     "sha3-512", "sha3_512")
 
 # --- PQC standardized: safe ------------------------------------------------
 _reg(CryptoFact("ML-KEM", Primitive.PKE, QuantumRisk.SAFE,
