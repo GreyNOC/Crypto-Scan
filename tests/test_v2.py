@@ -422,6 +422,109 @@ def test_report_mosca_section_is_opt_in():
     assert "X + Y > Z" in withm
 
 
+# --- Posture diffing -------------------------------------------------------
+
+import json as _json
+from cryptoscan.classifier import summarize as _summarize
+from cryptoscan import diff as diff_mod
+from cryptoscan import cli as cli_mod
+
+
+def _envelope(findings, target="t"):
+    return {"target": target, "summary": _summarize(findings),
+            "findings": [f.to_dict() for f in findings]}
+
+
+def test_diff_pure_resolution_is_migration_landed():
+    old = _envelope([classify("ECDH", AssetType.TLS_ENDPOINT, "h:443",
+                              key_establishment=True),
+                     classify("ML-KEM", AssetType.DEPENDENCY, "r.txt -> kyber")])
+    new = _envelope([classify("ML-KEM", AssetType.DEPENDENCY, "r.txt -> kyber")])
+    d = diff_mod.build_diff(old, new)
+    assert d["verdict"] == diff_mod.MIGRATION_LANDED
+    assert d["counts"]["resolved"] == 1
+    assert diff_mod.diff_exit_code(d["verdict"]) == 0
+
+
+def test_diff_new_critical_is_regression_exit_2():
+    old = _envelope([classify("ML-KEM", AssetType.DEPENDENCY, "r.txt -> kyber")])
+    new = _envelope([classify("ML-KEM", AssetType.DEPENDENCY, "r.txt -> kyber"),
+                     classify("ECDH", AssetType.TLS_ENDPOINT, "h:443",
+                              key_establishment=True)])
+    d = diff_mod.build_diff(old, new)
+    assert d["verdict"] == diff_mod.REGRESSION
+    assert diff_mod.diff_exit_code(d["verdict"]) == 2
+
+
+def test_diff_regression_wins_over_landing():
+    # Resolve an HNDL ECDH but introduce a new HNDL RSA-key-transport.
+    old = _envelope([classify("ECDH", AssetType.TLS_ENDPOINT, "h:443",
+                              key_establishment=True)])
+    new = _envelope([classify("RSA", AssetType.DEPENDENCY, "r.txt -> node-rsa",
+                              key_establishment=True)])
+    d = diff_mod.build_diff(old, new)
+    assert d["verdict"] == diff_mod.REGRESSION
+
+
+def test_diff_identical_is_no_change_exit_0():
+    fs = [classify("AES-256", AssetType.TLS_ENDPOINT, "h:443")]
+    d = diff_mod.build_diff(_envelope(fs), _envelope(fs))
+    assert d["verdict"] == diff_mod.NO_CHANGE
+    assert diff_mod.diff_exit_code(d["verdict"]) == 0
+
+
+def test_diff_line_move_is_moved_not_add_remove():
+    old = _envelope([classify("RSA", AssetType.SOURCE, "src/a.py:5")])
+    new = _envelope([classify("RSA", AssetType.SOURCE, "src/a.py:8")])
+    d = diff_mod.build_diff(old, new)
+    assert d["counts"]["moved"] == 1
+    assert d["counts"]["introduced"] == 0
+    assert d["counts"]["resolved"] == 0
+    assert d["verdict"] == diff_mod.NO_CHANGE
+
+
+def test_diff_strip_line_only_removes_trailing_int():
+    assert diff_mod.strip_line("src/a.py:5") == "src/a.py"
+    assert diff_mod.strip_line("src/a.py") == "src/a.py"
+
+
+def test_diff_moved_pairing_is_source_only():
+    # Two different certs on the same endpoint must not be paired as "moved".
+    old = _envelope([classify("RSA", AssetType.CERTIFICATE, "h:443",
+                              evidence="RSA-2048")])
+    new = _envelope([classify("ECDSA", AssetType.CERTIFICATE, "h:443",
+                              evidence="ECDSA-256")])
+    d = diff_mod.build_diff(old, new)
+    assert d["counts"]["moved"] == 0
+    assert d["counts"]["introduced"] == 1
+    assert d["counts"]["resolved"] == 1
+
+
+def test_diff_rejects_malformed_json(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"findings": [{"algorithm": "RSA"}]}', encoding="utf-8")
+    try:
+        diff_mod.load_findings_json(str(bad))
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+def test_diff_cli_end_to_end(tmp_path):
+    old = tmp_path / "old.json"
+    new = tmp_path / "new.json"
+    old.write_text(_json.dumps(_envelope(
+        [classify("ECDH", AssetType.TLS_ENDPOINT, "h:443",
+                  key_establishment=True)])), encoding="utf-8")
+    new.write_text(_json.dumps(_envelope([])), encoding="utf-8")
+    report = tmp_path / "diff.md"
+    rc = cli_mod.main(["diff", str(old), str(new), "--report", str(report)])
+    assert rc == 0
+    text = report.read_text(encoding="utf-8")
+    assert "MIGRATION_LANDED" in text
+    assert "no-fabrication" in text
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

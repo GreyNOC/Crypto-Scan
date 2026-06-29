@@ -20,7 +20,8 @@ from . import __version__
 from .classifier import Finding, summarize
 from .primitives import Severity
 from . import (tls_scanner, code_scanner, cbom as cbom_mod,
-               report as report_mod, sarif as sarif_mod, mosca as mosca_mod)
+               report as report_mod, sarif as sarif_mod, mosca as mosca_mod,
+               diff as diff_mod)
 from .mosca import MoscaParameters, DataTier, ZScenario
 
 
@@ -88,6 +89,36 @@ def _gate(summary: dict, fail_on: str) -> int:
         n for sev, n in by_sev.items() if Severity[sev].rank >= threshold
     )
     return 2 if triggered else 0
+
+
+def _run_diff(args) -> int:
+    """Diff two findings-JSON files (the assurance layer)."""
+    try:
+        old_doc = diff_mod.load_findings_json(args.old)
+        new_doc = diff_mod.load_findings_json(args.new)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    d = diff_mod.build_diff(old_doc, new_doc)
+    if args.report:
+        _write_text(args.report, diff_mod.render_markdown(d))
+        print(f"[+] Diff report written: {args.report}", file=sys.stderr)
+    if args.json:
+        _write_text(args.json, json.dumps(d, indent=2))
+        print(f"[+] Diff JSON written: {args.json}", file=sys.stderr)
+    c = d["counts"]
+    de = d["deltas"]
+    print(f"\n=== Posture diff: {d['old_target']} -> {d['new_target']} ===")
+    print(f"Verdict: {d['verdict']}")
+    print(f"introduced {c['introduced']} · resolved {c['resolved']} · "
+          f"moved {c['moved']} · persisting {c['persisting']}")
+    print(f"PQ-readiness {de['pq_readiness_score']:+d} · "
+          f"HNDL {de['hndl_exposed']:+d} · "
+          f"CRITICAL {de['by_severity']['CRITICAL']:+d}")
+    code = diff_mod.diff_exit_code(d["verdict"], args.fail_on_regression)
+    if code:
+        print("[gate] failing: posture regressed", file=sys.stderr)
+    return code
 
 
 def _parse_target(t: str) -> tuple[str, int]:
@@ -218,8 +249,21 @@ def main(argv: list[str] | None = None) -> int:
     sp_scan.add_argument("--tls", nargs="+", default=[], metavar="HOST[:PORT]")
     _add_outputs(sp_scan)
 
+    sp_diff = sub.add_parser(
+        "diff", help="diff two findings JSON files (did the migration land?)")
+    sp_diff.add_argument("old", metavar="OLD.json")
+    sp_diff.add_argument("new", metavar="NEW.json")
+    sp_diff.add_argument("--report", metavar="FILE", help="write Markdown diff")
+    sp_diff.add_argument("--json", metavar="FILE", help="write machine diff JSON")
+    sp_diff.add_argument("--fail-on-regression", action=argparse.BooleanOptionalAction,
+                         default=True,
+                         help="exit 2 if posture regressed (default: on)")
+
     args = p.parse_args(argv)
     _force_utf8()
+
+    if args.cmd == "diff":
+        return _run_diff(args)
 
     if args.cmd == "tls":
         findings = _run_tls(args.targets)
