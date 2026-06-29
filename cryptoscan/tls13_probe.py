@@ -122,6 +122,16 @@ class ServerHelloResult:
     error: str | None = None
 
 
+# TLS 1.3 cipher suites (IANA TLS Cipher Suites registry / RFC 8446 §B.4).
+TLS13_CIPHER_SUITES: dict[int, str] = {
+    0x1301: "TLS_AES_128_GCM_SHA256",
+    0x1302: "TLS_AES_256_GCM_SHA384",
+    0x1303: "TLS_CHACHA20_POLY1305_SHA256",
+    0x1304: "TLS_AES_128_CCM_SHA256",
+    0x1305: "TLS_AES_128_CCM_8_SHA256",
+}
+
+
 @dataclass
 class TLS13Observation:
     host: str
@@ -131,6 +141,7 @@ class TLS13Observation:
     supports_pqc_hybrid: bool = False
     is_tls13: bool = False
     accepted_groups: list[NamedGroup] = field(default_factory=list)
+    accepted_cipher_suites: list[str] = field(default_factory=list)
     error: str | None = None
 
 
@@ -148,7 +159,9 @@ def _extension(ext_type: int, data: bytes) -> bytes:
 def build_client_hello(server_name: str,
                        groups: "tuple[NamedGroup, ...]" = _DEFAULT_OFFER,
                        *, key_share_groups: "tuple[NamedGroup, ...]" =
-                       (NamedGroup.x25519,)) -> bytes:
+                       (NamedGroup.x25519,),
+                       cipher_suites: "tuple[int, ...]" =
+                       (0x1301, 0x1302, 0x1303)) -> bytes:
     """Build a complete TLS record carrying a TLS 1.3 ClientHello."""
     # Deterministic 32-byte client random (no Math.random / Date dependency;
     # the value is not security-relevant for a probe).
@@ -182,11 +195,11 @@ def build_client_hello(server_name: str,
 
     extensions = sni_ext + sv_ext + sg_ext + sa_ext + ks_ext
 
-    cipher_suites = struct.pack(">HHH", 0x1301, 0x1302, 0x1303)  # AES-GCM/ChaCha
+    suites = b"".join(struct.pack(">H", c) for c in cipher_suites)
     body = (struct.pack(">H", _LEGACY_VERSION)
             + client_random
             + _vec(b"", 1)               # legacy_session_id (empty)
-            + _vec(cipher_suites, 2)
+            + _vec(suites, 2)
             + _vec(b"\x00", 1)           # compression: null
             + _vec(extensions, 2))
     handshake = struct.pack(">B", _HS_CLIENT_HELLO) + _vec(body, 3)
@@ -341,4 +354,21 @@ def probe(host: str, port: int = 443, timeout: float = 8.0) -> TLS13Observation:
             obs.supports_pqc_hybrid = True
             if g not in obs.accepted_groups:
                 obs.accepted_groups.append(g)
+    # Enumerate the server's full accepted TLS 1.3 cipher-suite set by offering
+    # each suite alone (closes the single-handshake limitation for TLS 1.3).
+    if obs.is_tls13:
+        obs.accepted_cipher_suites = _enumerate_tls13_ciphers(host, port, timeout)
     return obs
+
+
+def _enumerate_tls13_ciphers(host: str, port: int, timeout: float) -> list[str]:
+    accepted: list[str] = []
+    for code, name in TLS13_CIPHER_SUITES.items():
+        try:
+            ch = build_client_hello(host, cipher_suites=(code,))
+            res = _read_handshake(host, port, ch, timeout)
+        except Exception:  # noqa: BLE001 — enumeration is advisory
+            continue
+        if res.error is None and res.cipher_suite == code:
+            accepted.append(name)
+    return accepted

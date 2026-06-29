@@ -250,6 +250,9 @@ def build_cbom(findings: list[Finding], target: str) -> dict:
                     f.locator, {"protocol": proto, "suites": set()})
                 if ex.get("role") in _SUITE_ROLES and f.evidence:
                     ep["suites"].add(f.evidence)
+                # Full enumerated accepted set, when the probe captured it.
+                for suite in ex.get("accepted_cipher_suites") or ():
+                    ep["suites"].add(suite)
 
     for locator, info in endpoints.items():
         components.append(_protocol_component(

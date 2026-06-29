@@ -155,6 +155,50 @@ def probe(host: str, port: int = 443, timeout: float = 8.0) -> TLSObservation:
     return obs
 
 
+def _enumerate_tls12_suites(host: str, port: int, timeout: float) -> list[str]:
+    """Enumerate the TLS<=1.2 cipher suites the server accepts, via repeated
+    handshakes that each exclude the suites already found (OpenSSL '!NAME'
+    syntax). Best-effort: degrades gracefully on restrictive OpenSSL builds, and
+    returns [] for a TLS-1.3-only server (handled by the raw probe instead)."""
+    accepted: list[str] = []
+    excluded = ""
+    for _ in range(32):  # safety cap; real servers run out of suites well before
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            ctx.minimum_version = ssl.TLSVersion.TLSv1
+            ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        except (ValueError, AttributeError):
+            pass
+        # Prefer SECLEVEL=0 so legacy suites (3DES/CBC) can be offered and thus
+        # detected; fall back if the build rejects it.
+        if not any(_try_set_ciphers(ctx, s) for s in (
+                f"ALL:COMPLEMENTOFALL:@SECLEVEL=0{excluded}",
+                f"ALL:COMPLEMENTOFALL{excluded}")):
+            break
+        try:
+            with socket.create_connection((host, port), timeout=timeout) as sock:
+                with ctx.wrap_socket(sock, server_hostname=host) as tls:
+                    c = tls.cipher()
+                    name = c[0] if c else None
+        except (ssl.SSLError, OSError):
+            break
+        if not name or name in accepted:
+            break
+        accepted.append(name)
+        excluded += ":!" + name
+    return accepted
+
+
+def _try_set_ciphers(ctx: ssl.SSLContext, cipher_str: str) -> bool:
+    try:
+        ctx.set_ciphers(cipher_str)
+        return True
+    except ssl.SSLError:
+        return False
+
+
 def scan(host: str, port: int = 443, timeout: float = 8.0) -> list[Finding]:
     """Probe a TLS endpoint and emit classified Findings."""
     obs = probe(host, port, timeout)
@@ -163,12 +207,31 @@ def scan(host: str, port: int = 443, timeout: float = 8.0) -> list[Finding]:
     if obs.error:
         return findings
 
-    # Cipher-suite-derived primitives.
+    # TLS 1.3 group + PQC-hybrid readiness + accepted cipher-suite enumeration.
+    try:
+        g = tls13_probe.probe(host, port, timeout)
+    except Exception:  # noqa: BLE001 — probe is advisory
+        g = None
+
+    # Cipher-suite-derived primitives, from the negotiated suite AND the server's
+    # full accepted set (TLS 1.3 raw enumeration + the TLS 1.2 set_ciphers loop) —
+    # one finding per unique primitive. Closes the single-handshake limitation.
+    suite_names: list[str] = []
     if obs.cipher_name:
-        for token, role in _cipher_tokens(obs.cipher_name):
+        suite_names.append(obs.cipher_name)
+    if g is not None:
+        suite_names.extend(g.accepted_cipher_suites)
+    suite_names.extend(_enumerate_tls12_suites(host, port, timeout))
+    all_suites = sorted(set(suite_names))
+    seen_tokens: set[str] = set()
+    for suite in suite_names:
+        for token, role in _cipher_tokens(suite):
+            if token in seen_tokens:
+                continue
+            seen_tokens.add(token)
             f = classify(
                 token, AssetType.TLS_ENDPOINT, locator,
-                evidence=obs.cipher_name,
+                evidence=suite,
                 key_establishment=(role == "key-exchange"),
                 # Transport key exchange is treated as long-lived-data exposed:
                 # captured ciphertext is decryptable once the KEX is broken.
@@ -207,11 +270,8 @@ def scan(host: str, port: int = 443, timeout: float = 8.0) -> list[Finding]:
             findings.append(f)
 
     # TLS 1.3 negotiated key-exchange group — the live HNDL signal v0.1.0 could
-    # not see, plus PQC-hybrid readiness. Best-effort; never fails the scan.
-    try:
-        g = tls13_probe.probe(host, port, timeout)
-    except Exception:  # noqa: BLE001 — probe is advisory
-        g = None
+    # not see, plus PQC-hybrid readiness. Carries the full accepted cipher-suite
+    # set so the CBOM protocol asset can enumerate it.
     if g is not None and g.negotiated_group is not None:
         ng = g.negotiated_group
         f = classify(
@@ -222,7 +282,8 @@ def scan(host: str, port: int = 443, timeout: float = 8.0) -> list[Finding]:
             extra={"protocol": "TLSv1.3", "role": "kex-group",
                    "group_code": f"0x{int(ng):04X}",
                    "pqc_hybrid": ng.is_hybrid_pqc,
-                   "supports_pqc_hybrid": g.supports_pqc_hybrid},
+                   "supports_pqc_hybrid": g.supports_pqc_hybrid,
+                   "accepted_cipher_suites": all_suites},
         )
         if f:
             findings.append(f)

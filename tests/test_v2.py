@@ -308,6 +308,25 @@ def test_client_hello_is_well_formed():
     assert struct.unpack_from(">H", ch, 3)[0] == len(ch) - 5
 
 
+def test_tls13_cipher_suite_codepoints():
+    cs = tls13_probe.TLS13_CIPHER_SUITES
+    assert cs[0x1301] == "TLS_AES_128_GCM_SHA256"
+    assert cs[0x1302] == "TLS_AES_256_GCM_SHA384"
+    assert cs[0x1303] == "TLS_CHACHA20_POLY1305_SHA256"
+    assert cs[0x1304] == "TLS_AES_128_CCM_SHA256"
+    assert cs[0x1305] == "TLS_AES_128_CCM_8_SHA256"
+
+
+def test_build_client_hello_carries_requested_cipher_suites():
+    ch = tls13_probe.build_client_hello("example.com", cipher_suites=(0x1304,))
+    assert struct.pack(">H", 0x1304) in ch
+    # default offer still includes the three AEAD suites
+    default = tls13_probe.build_client_hello("example.com")
+    assert struct.pack(">H", 0x1303) in default
+    # round-trips a parseable record (handshake / ClientHello)
+    assert ch[0] == 0x16 and ch[5] == 0x01
+
+
 def test_hybrid_kex_is_pq_safe_not_hndl():
     for token in ("x25519mlkem768", "secp256r1mlkem768", "x25519kyber768"):
         f = classify(token, AssetType.TLS_ENDPOINT, "h:443",
