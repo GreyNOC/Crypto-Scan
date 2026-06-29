@@ -1,0 +1,110 @@
+name: Release
+
+# Cut a release by pushing a tag, e.g. `git tag v0.2.1 && git push origin v0.2.1`.
+# Builds the wheel + sdist and a self-contained `gs` portable for Linux, macOS
+# and Windows, then publishes them all to the GitHub release.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  dists:
+    name: wheel + sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip build
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dists
+          path: dist/*
+
+  portable:
+    name: portable (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x64
+            fmt: gztar
+          - os: macos-latest
+            label: macos-arm64
+            fmt: gztar
+          - os: windows-latest
+            label: windows-x64
+            fmt: zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pyinstaller
+
+      - name: Build portable binary
+        run: python packaging/build_portable.py
+
+      - name: Smoke-test the binary
+        run: |
+          BIN=portable/gs
+          [ -f portable/gs.exe ] && BIN=portable/gs.exe
+          "$BIN" --version
+          "$BIN" code ./sample-target --fail-on none
+
+      - name: Archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          python packaging/make_archive.py \
+            "greynoc-cryptoscan-${VERSION}-${{ matrix.label }}-portable" \
+            "${{ matrix.fmt }}" portable
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-${{ matrix.label }}
+          path: greynoc-cryptoscan-*-portable.*
+
+  release:
+    name: publish
+    needs: [dists, portable]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+          merge-multiple: true
+
+      - name: Checksums + notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ( cd staged && sha256sum * > SHA256SUMS.txt )
+          python packaging/changelog_section.py "$VERSION" > NOTES.md
+          echo "----- release notes -----"; cat NOTES.md
+
+      - name: Publish to the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes-file NOTES.md \
+              staged/* \
+          || gh release upload "${GITHUB_REF_NAME}" staged/* --clobber
