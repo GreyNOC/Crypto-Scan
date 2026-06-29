@@ -554,11 +554,107 @@ def test_diff_cli_end_to_end(tmp_path):
     assert "no-fabrication" in text
 
 
+# --- Review fixes ----------------------------------------------------------
+
+def test_scan_root_under_skipdir_still_finds_things(tmp_path):
+    # Fix #1: a project living under a dir named like a SKIP_DIRS entry must
+    # still be scanned (SKIP_DIRS is relative to the scan root, not absolute).
+    proj = tmp_path / "build" / "myproject" / "src"
+    proj.mkdir(parents=True)
+    (proj / "a.py").write_text("rsa_key = RSA.generate(2048)\n",
+                               encoding="utf-8")
+    fs = _cs.scan(tmp_path / "build" / "myproject")
+    assert any(f.fact.name == "RSA" for f in fs)
+    # But a real vendored dir *inside* the project is still skipped.
+    vend = proj / "vendor"
+    vend.mkdir()
+    (vend / "b.py").write_text("h = hashlib.md5(b'')\n", encoding="utf-8")
+    fs2 = _cs.scan(tmp_path / "build" / "myproject")
+    assert not any("vendor" in f.locator for f in fs2)
+
+
+def test_cbom_pqc_level_is_param_set_aware():
+    def level(token):
+        f = classify(token, AssetType.DEPENDENCY, "r.txt -> " + token,
+                     evidence=token)
+        return cbom_mod._algorithm_component(f)["cryptoProperties"][
+            "algorithmProperties"]["nistQuantumSecurityLevel"]
+    assert level("ml-kem-512") == 1
+    assert level("ml-dsa-44") == 2
+    assert level("ml-kem-768") == 3
+    assert level("ml-kem-1024") == 5
+    assert level("ml-dsa-87") == 5
+    assert level("ML-KEM") == 3            # generic, no set -> recommended cat 3
+
+
+def test_source_scan_has_no_duplicate_fingerprints():
+    # Fix #5: the same line matching multiple patterns must not double-count.
+    sample = Path(__file__).resolve().parents[1] / "sample-target"
+    fs = _cs.scan(sample)
+    fps = [f.fingerprint for f in fs]
+    assert len(fps) == len(set(fps))       # summarize() now agrees with consumers
+
+
+def test_effective_classical_bits_follows_the_curve():
+    # Fix #6: an EC key on a stronger curve reports its real strength.
+    ec384 = classify("ECDSA", AssetType.CERTIFICATE, "h:443",
+                     parameter="secp384r1")
+    assert ec384.effective_classical_bits() == 192
+    rsa4096 = classify("RSA", AssetType.CERTIFICATE, "h:443", parameter="4096")
+    assert rsa4096.effective_classical_bits() == 128
+
+
+def test_sarif_never_emits_startline_zero():
+    # Fix #7: a :0 locator must fall back to a whole-file location.
+    loc = sarif_mod._parse_locator(AssetType.SOURCE, "app/x.py:0")
+    assert "region" not in loc
+    assert loc["artifactLocation"]["uri"] == "app/x.py:0"
+
+
+def test_cli_skips_bad_tls_target_without_crashing():
+    # Fix #8: a non-numeric port is skipped, not a fatal traceback.
+    from cryptoscan import cli as _cli
+    try:
+        _cli._parse_target("example.com:https")
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+    # The full code path must not raise.
+    assert _cli._run_tls(["example.com:https"]) == []
+
+
+def test_parse_server_hello_rejects_truncated_extension():
+    # Fix #2: an extension length past the buffer must not surface a group.
+    import struct as _s
+    from cryptoscan import tls13_probe as _t
+    # key_share ext claims 100 bytes but only 2 follow.
+    ksd = _s.pack(">H", 0x1234)
+    ks = _s.pack(">HH", _t._EXT_KEY_SHARE, 100) + ksd
+    body = (_s.pack(">H", 0x0303) + b"\x01" * 32 + b"\x00" +
+            _s.pack(">H", 0x1301) + b"\x00" + _s.pack(">H", len(ks)) + ks)
+    r = _t.parse_server_hello(body)
+    assert r.error is not None
+    assert r.selected_group is None
+    assert r.negotiated_version is None
+
+
+def test_parse_server_hello_never_raises_on_random_bytes():
+    from cryptoscan import tls13_probe as _t
+    for b in (b"", b"\x00", b"\xff" * 7, bytes(range(40)), b"\x03\x03" + b"\x00" * 5):
+        r = _t.parse_server_hello(b)        # must not raise
+        assert r is not None
+
+
 if __name__ == "__main__":
+    import inspect
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    passed = 0
+    passed = skipped = 0
     for fn in fns:
+        if inspect.signature(fn).parameters:
+            print(f"SKIP {fn.__name__} (needs a pytest fixture; run under pytest)")
+            skipped += 1
+            continue
         try:
             fn()
             print(f"PASS {fn.__name__}")
@@ -566,5 +662,6 @@ if __name__ == "__main__":
         except Exception:
             print(f"FAIL {fn.__name__}")
             traceback.print_exc()
-    print(f"\n{passed}/{len(fns)} passed")
-    raise SystemExit(0 if passed == len(fns) else 1)
+    runnable = len(fns) - skipped
+    print(f"\n{passed}/{runnable} passed ({skipped} skipped — run under pytest)")
+    raise SystemExit(0 if passed == runnable else 1)

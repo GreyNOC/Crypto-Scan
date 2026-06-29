@@ -124,14 +124,21 @@ def _run_diff(args) -> int:
 def _parse_target(t: str) -> tuple[str, int]:
     if ":" in t and not t.startswith("["):
         host, _, port = t.rpartition(":")
-        return host, int(port)
+        try:
+            return host, int(port)
+        except ValueError:
+            raise ValueError(f"bad target '{t}': port must be numeric")
     return t, 443
 
 
 def _run_tls(targets: list[str]) -> list[Finding]:
     findings: list[Finding] = []
     for t in targets:
-        host, port = _parse_target(t)
+        try:
+            host, port = _parse_target(t)
+        except ValueError as exc:
+            print(f"    ! skipping {exc}", file=sys.stderr)
+            continue
         print(f"[*] TLS handshake: {host}:{port}", file=sys.stderr)
         obs = tls_scanner.probe(host, port)
         if obs.error:

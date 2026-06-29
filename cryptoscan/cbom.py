@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime, timezone
 
 from .classifier import Finding, AssetType
-from .primitives import Primitive, QuantumRisk
+from .primitives import Primitive, QuantumRisk, PQC_PARAM_SETS
 
 from ._version import __version__
 
@@ -57,16 +57,20 @@ def _nist_level(f: Finding) -> int:
 
 
 def _pqc_level(f: Finding) -> int:
-    """Standardized-PQC category, param-set-aware where the set is known.
+    """Standardized-PQC NIST category, param-set-aware where the set is known.
 
-    Default to the recommended category-3 sets (ML-KEM-768 / ML-DSA-65) when no
-    parameter set is observed — those are CryptoScan's own migration targets.
+    The canonical PQC facts have a generic name ('ML-KEM') and usually no
+    `parameter`, so we look for a known parameter-set token in the parameter and
+    the observed evidence (e.g. a dependency named 'ml-kem-512'). Default to the
+    recommended category-3 sets (ML-KEM-768 / ML-DSA-65) when none is observed.
     """
-    tag = f"{f.fact.name} {f.parameter or ''}".lower()
-    if any(x in tag for x in ("1024", "-87", "256s", "256f")):
-        return 5
-    if "512" in tag or "-44" in tag:
-        return 2 if "dsa" in tag else 1
+    for src in (f.parameter, f.evidence, f.fact.name):
+        if not src:
+            continue
+        low = str(src).lower()
+        for param_set, category in PQC_PARAM_SETS.items():
+            if param_set in low:
+                return category
     return 3
 
 
@@ -198,9 +202,9 @@ def _greynoc_properties(f: Finding) -> list[dict]:
         {"name": "greynoc:assetType", "value": f.asset_type.value},
         {"name": "greynoc:evidence", "value": f.evidence[:200]},
     ]
-    if f.fact.classical_bits is not None:
-        props.append({"name": "greynoc:classicalBits",
-                      "value": str(f.fact.classical_bits)})
+    cbits = f.effective_classical_bits()
+    if cbits is not None:
+        props.append({"name": "greynoc:classicalBits", "value": str(cbits)})
     if f.fact.quantum_bits is not None:
         props.append({"name": "greynoc:quantumBits",
                       "value": str(f.fact.quantum_bits)})

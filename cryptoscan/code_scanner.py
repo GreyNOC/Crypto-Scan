@@ -138,11 +138,19 @@ DEP_SIGNATURES: dict[str, str | None] = {
 MAX_FILE_BYTES = 2_000_000  # skip files larger than 2 MB
 
 
+def _rel_parts(path: Path, root: Path) -> tuple[str, ...]:
+    """Path parts relative to the scan root. SKIP_DIRS must be tested against
+    these, NOT path.parts — otherwise scanning a project that simply lives under
+    a directory named e.g. 'build' or 'vendor' would skip every file."""
+    rel = path.relative_to(root) if path.is_relative_to(root) else path
+    return rel.parts
+
+
 def _iter_source_files(root: Path):
     for p in root.rglob("*"):
         if p.is_dir():
             continue
-        if any(part in SKIP_DIRS for part in p.parts):
+        if any(part in SKIP_DIRS for part in _rel_parts(p, root)):
             continue
         if p.suffix.lower() in SOURCE_EXTS:
             try:
@@ -329,7 +337,8 @@ MANIFESTS = {
 def scan_dependencies(root: Path) -> list[Finding]:
     findings: list[Finding] = []
     for path in root.rglob("*"):
-        if path.is_dir() or any(part in SKIP_DIRS for part in path.parts):
+        if path.is_dir() or any(part in SKIP_DIRS
+                                for part in _rel_parts(path, root)):
             continue
         parser = MANIFESTS.get(path.name.lower())
         if not parser:
@@ -356,4 +365,16 @@ def scan_dependencies(root: Path) -> list[Finding]:
 
 def scan(root: str | Path) -> list[Finding]:
     root = Path(root)
-    return scan_source(root) + scan_dependencies(root)
+    findings = scan_source(root) + scan_dependencies(root)
+    # Dedupe by fingerprint: several patterns can match one source line and
+    # produce identical (asset|locator|algo|evidence) fingerprints. Without
+    # this, summarize() over-counts while every fingerprint-keyed consumer
+    # (report/CBOM/SARIF/diff) collapses them — header and body would disagree.
+    seen: set[str] = set()
+    deduped: list[Finding] = []
+    for f in findings:
+        if f.fingerprint in seen:
+            continue
+        seen.add(f.fingerprint)
+        deduped.append(f)
+    return deduped

@@ -71,6 +71,13 @@ class Finding:
             return True
         return self._param_weak()
 
+    def effective_classical_bits(self) -> int | None:
+        """Classical strength in bits, refined by the observed parameter when we
+        have one (e.g. secp384r1 -> 192, RSA-4096 -> 128), else the fact's
+        nominal bits. Keeps reported strength faithful to the actual key/curve."""
+        bits, _ = strength_for(self.fact.name, self.parameter)
+        return bits if bits is not None else self.fact.classical_bits
+
     def _is_key_establishment(self) -> bool:
         # Key-agreement primitives are always key establishment. Public-key
         # encryption (RSA) only when the observed role says so — an RSA *cert*
@@ -104,7 +111,7 @@ class Finding:
             "locator": self.locator,
             "evidence": self.evidence,
             "parameter": self.parameter,
-            "classical_bits": self.fact.classical_bits,
+            "classical_bits": self.effective_classical_bits(),
             "quantum_bits": self.fact.quantum_bits,
             "standard": self.fact.standard,
             "migrate_to": list(self.fact.migrate_to),

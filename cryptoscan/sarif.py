@@ -58,12 +58,13 @@ def _parse_locator(asset_type: AssetType, locator: str) -> dict | None:
     """
     if asset_type is AssetType.SOURCE:
         path, sep, tail = locator.rpartition(":")
-        if sep and tail.isdigit():
+        # SARIF region.startLine has a schema minimum of 1.
+        if sep and tail.isdigit() and int(tail) >= 1:
             return {
                 "artifactLocation": {"uri": path},
                 "region": {"startLine": int(tail)},
             }
-        # No parseable line — report the whole file.
+        # No parseable (>=1) line — report the whole file.
         return {"artifactLocation": {"uri": locator}}
     if asset_type is AssetType.DEPENDENCY:
         manifest = locator.split(" -> ", 1)[0].strip()

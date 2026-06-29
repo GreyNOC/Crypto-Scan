@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import socket
 import struct
+import time
 from dataclasses import dataclass, field
 from enum import IntEnum
 
@@ -211,9 +212,15 @@ def parse_server_hello(handshake_body: bytes) -> ServerHelloResult:
         ext_total = struct.unpack_from(">H", handshake_body, off)[0]
         off += 2
         end = off + ext_total
+        if end > len(handshake_body):
+            raise ValueError("extensions overrun handshake body")
         while off + 4 <= end:
             etype, elen = struct.unpack_from(">HH", handshake_body, off)
             off += 4
+            if off + elen > end:
+                # A hostile/truncated server must not be able to spoof a group
+                # by claiming an extension length past the buffer.
+                raise ValueError("extension length overruns")
             edata = handshake_body[off:off + elen]
             off += elen
             if etype == _EXT_SUPPORTED_VERSIONS and len(edata) >= 2:
@@ -224,8 +231,13 @@ def parse_server_hello(handshake_body: bytes) -> ServerHelloResult:
                 r.selected_group = struct.unpack(">H", edata[:2])[0]
         if r.negotiated_version is None:
             r.negotiated_version = _LEGACY_VERSION
-    except (IndexError, struct.error) as exc:
+    except (IndexError, struct.error, ValueError) as exc:
+        # Never trust a partially-parsed ServerHello: clear everything so a
+        # malformed message can't surface a fabricated group/version.
         r.error = f"parse: {type(exc).__name__}"
+        r.is_server_hello = False
+        r.selected_group = None
+        r.negotiated_version = None
     return r
 
 
@@ -237,13 +249,21 @@ def _read_handshake(host: str, port: int, client_hello: bytes,
             sock.sendall(client_hello)
             buf = bytearray()
             handshake = bytearray()
-            deadline_reads = 0
-            while deadline_reads < 8:
+            # Absolute wall-clock deadline: socket.recv timeouts are per-call, so
+            # a server dribbling one byte per timeout could otherwise stall the
+            # probe ~16x. The read cap is a secondary flood guard.
+            end_at = time.monotonic() + timeout
+            reads = 0
+            while reads < 64:
+                remaining = end_at - time.monotonic()
+                if remaining <= 0:
+                    return ServerHelloResult(error="timeout")
+                sock.settimeout(remaining)
                 chunk = sock.recv(4096)
                 if not chunk:
                     break
                 buf += chunk
-                deadline_reads += 1
+                reads += 1
                 # Drain whole records from buf.
                 made_progress = True
                 while made_progress:
@@ -286,7 +306,9 @@ def probe(host: str, port: int = 443, timeout: float = 8.0) -> TLS13Observation:
     readiness. Returns a TLS13Observation; never raises."""
     obs = TLS13Observation(host=host, port=port)
     res = _read_handshake(host, port, build_client_hello(host), timeout)
-    if res.error and res.selected_group is None:
+    if res.error:
+        # Any error -> discard. parse_server_hello already nulls partial state,
+        # but never trust a result that also carries an error.
         obs.error = res.error
         return obs
     if res.alert is not None:
