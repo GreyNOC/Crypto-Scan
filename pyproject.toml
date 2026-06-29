@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-validation = ["cyclonedx-python-lib[json-validation]>=8"]
+validation = ["cyclonedx-python-lib[json-validation]>=8", "jsonschema>=4"]
 
 [project.scripts]
 cryptoscan = "cryptoscan.cli:main"

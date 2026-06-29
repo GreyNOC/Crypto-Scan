@@ -374,7 +374,7 @@ def test_malformed_manifest_does_not_crash_scan(tmp_path):
 
 # --- Mosca risk engine -----------------------------------------------------
 
-from cryptoscan.mosca import (MoscaParameters, DataTier, Urgency,
+from cryptoscan.mosca import (MoscaParameters, DataTier, ZScenario, Urgency,
                               assess, assess_posture, mosca_summary)
 
 
@@ -663,6 +663,151 @@ def test_pom_parser_rejects_entity_expansion(tmp_path):
         '<artifactId>bcprov-jdk18on</artifactId>'
         '</dependency></dependencies></project>', encoding="utf-8")
     assert _cs._parse_pom(tmp_path / "pom2.xml") == ["bcprov-jdk18on"]
+
+
+# --- QAQC regression tests -------------------------------------------------
+
+from cryptoscan import report as report_mod
+from cryptoscan.mosca import MoscaParameters as _MP
+
+
+def test_cbom_hybrid_nist_level_by_strength():
+    def lvl(token):
+        f = classify(token, AssetType.TLS_ENDPOINT, "h:443",
+                     key_establishment=True)
+        return cbom_mod._algorithm_component(f)["cryptoProperties"][
+            "algorithmProperties"]["nistQuantumSecurityLevel"]
+    assert lvl("secp384r1mlkem1024") == 5   # ML-KEM-1024 strength
+    assert lvl("x25519mlkem768") == 3       # ML-KEM-768 strength
+    assert lvl("secp256r1mlkem768") == 3
+    assert lvl("ML-KEM") == 3               # generic -> recommended cat 3
+
+
+def test_diff_escalating_move_is_regression():
+    old = _envelope([classify("RSA", AssetType.SOURCE, "app.py:10")])  # HIGH
+    nf = classify("RSA", AssetType.SOURCE, "app.py:55", key_establishment=True)
+    new = _envelope([nf])                                              # CRITICAL+HNDL
+    d = diff_mod.build_diff(old, new)
+    assert d["verdict"] == diff_mod.REGRESSION
+    assert d["counts"]["moved"] == 0
+    assert diff_mod.diff_exit_code(d["verdict"]) == 2
+
+
+def test_diff_plain_move_still_neutral():
+    old = _envelope([classify("RSA", AssetType.SOURCE, "app.py:10")])
+    new = _envelope([classify("RSA", AssetType.SOURCE, "app.py:55")])
+    d = diff_mod.build_diff(old, new)
+    assert d["counts"]["moved"] == 1
+    assert d["verdict"] == diff_mod.NO_CHANGE
+
+
+def test_diff_partial_verdict():
+    old = _envelope([classify("MD5", AssetType.SOURCE, "x.py:1")])
+    new = _envelope([classify("SHA-1", AssetType.SOURCE, "x.py:1")])
+    d = diff_mod.build_diff(old, new)
+    assert d["verdict"] == diff_mod.PARTIAL
+    assert d["counts"]["introduced"] == 1 and d["counts"]["resolved"] == 1
+
+
+def test_report_hndl_and_roadmap_sections():
+    findings = [
+        classify("ECDH", AssetType.TLS_ENDPOINT, "h:443", key_establishment=True),
+        classify("MD5", AssetType.SOURCE, "a.py:1"),
+        classify("AES-256", AssetType.TLS_ENDPOINT, "h:443"),
+    ]
+    md = report_mod.render(findings, "t")
+    assert "Priority 0 — Harvest-now-decrypt-later" in md
+    assert "Migration roadmap" in md
+    # Worst severity first: ECDH (CRITICAL) roadmap entry precedes MD5 (HIGH).
+    assert md.index("Replace ECDH") < md.index("Replace MD5")
+    assert "Findings (severity-ranked)" in md
+
+
+def test_report_empty_findings_says_no_migration():
+    md = report_mod.render([], "t")
+    assert "No quantum-vulnerable primitives requiring migration" in md
+    assert "100/100" in md
+
+
+def test_cli_code_scan_writes_all_artifacts(tmp_path):
+    sample = Path(__file__).resolve().parents[1] / "sample-target"
+    out = {k: str(tmp_path / f"o.{k}") for k in ("cbom", "report", "json", "sarif")}
+    rc = cli_mod.main([
+        "code", str(sample),
+        "--cbom", out["cbom"], "--report", out["report"],
+        "--json", out["json"], "--sarif", out["sarif"],
+        "--mosca", "--fail-on", "none",
+    ])
+    assert rc == 0
+    for p in out.values():
+        assert Path(p).exists() and Path(p).stat().st_size > 0
+    import json as _j
+    assert "mosca" in _j.loads(Path(out["json"]).read_text(encoding="utf-8"))
+    # Default gate trips on CRITICAL findings.
+    assert cli_mod.main(["code", str(sample)]) == 2
+
+
+def test_mosca_from_args_parses_overrides():
+    import argparse
+    ns = argparse.Namespace(z_scenario="low", secrecy_years=["secret=20"],
+                            default_tier="top-secret", crqc_years=7,
+                            migration_years=4)
+    params, scenario = cli_mod._mosca_from_args(ns)
+    assert scenario is ZScenario.LOW
+    assert params.migration_years == 4
+    assert params.default_tier is DataTier.TOP_SECRET
+    assert params.secrecy_years[DataTier.SECRET] == 20
+    assert params.crqc_years[ZScenario.LOW] == 7
+
+
+def test_mosca_from_args_ignores_malformed_input():
+    import argparse
+    ns = argparse.Namespace(z_scenario="expected", secrecy_years=["bogus=x", "nope"],
+                            default_tier="not-a-tier", crqc_years=None,
+                            migration_years=None)
+    params, scenario = cli_mod._mosca_from_args(ns)   # must not raise
+    assert scenario is ZScenario.EXPECTED
+    assert params.default_tier is DataTier.CONFIDENTIAL  # default preserved
+
+
+def test_mosca_tolerates_partial_secrecy_dict():
+    p = _MP(secrecy_years={DataTier.CONFIDENTIAL: 99})   # missing other tiers
+    v = assess(_ecdh(extra={"data_tier": "transient"}), p, now_year=2026)
+    assert v.x_secrecy_years == 1                        # falls back to default
+
+
+def test_parse_target_variants():
+    from cryptoscan.cli import _parse_target
+    assert _parse_target("example.com") == ("example.com", 443)
+    assert _parse_target("example.com:8443") == ("example.com", 8443)
+    # Bracketed IPv6 keeps the default port (documented limitation).
+    assert _parse_target("[::1]:443") == ("[::1]:443", 443)
+
+
+def test_dependency_scan_skips_oversized_manifest(tmp_path):
+    big = tmp_path / "requirements.txt"
+    big.write_text("rsa\n" + ("# " + "a" * 2_000_010) + "\n", encoding="utf-8")
+    fs = _cs.scan_dependencies(tmp_path)
+    assert fs == []                                      # too big -> skipped
+
+
+def test_sarif_conforms_to_sarif_2_1_0_schema():
+    try:
+        import json
+        import urllib.request
+        import jsonschema
+    except ImportError:
+        return
+    try:
+        schema = json.load(urllib.request.urlopen(
+            "https://json.schemastore.org/sarif-2.1.0.json", timeout=20))
+    except Exception:
+        return  # offline — skip rather than fail the suite
+    doc = sarif_mod.build_sarif(
+        [classify("MD5", AssetType.SOURCE, "src/a.py:3"),
+         classify("RSA", AssetType.DEPENDENCY, "requirements.txt -> node-rsa",
+                  key_establishment=True)], "t")
+    jsonschema.validate(doc, schema)
 
 
 if __name__ == "__main__":

@@ -219,7 +219,9 @@ def assess(finding: Finding, params: MoscaParameters | None = None, *,
     if now_year is None:
         now_year = _this_year()
     tier = tier or _resolve_tier(finding, params)
-    x = params.secrecy_years[tier]
+    # Tolerate a partial secrecy_years dict (library callers) by falling back to
+    # the built-in default for any tier the caller didn't override.
+    x = params.secrecy_years.get(tier, DEFAULT_SECRECY_YEARS[tier])
     y = params.migration_years
     z = params.crqc_years[scenario]
     slack = z - (x + y)

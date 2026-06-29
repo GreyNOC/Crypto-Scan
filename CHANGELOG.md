@@ -7,7 +7,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 The leap from inventory tool to decision engine. Default output (no new flags)
 stays v0.1.0-shaped except for the enriched CBOM; all new analysis is opt-in.
-The 15 v0.1.0 regression tests stay green; 62 tests total.
+The 15 v0.1.0 regression tests stay green, with a broad v0.2.0 suite on top.
 
 ### Added
 - **Mosca Risk Engine** (`mosca.py`, `--mosca`). Applies Mosca's inequality
@@ -21,7 +21,8 @@ The 15 v0.1.0 regression tests stay green; 62 tests total.
   (dummy key shares; only the 2-byte selected group is read). Verified live
   against Cloudflare/Google (→ X25519MLKEM768).
 - **SARIF 2.1.0 output** (`sarif.py`, `--sarif`) for GitHub code scanning;
-  validated against the SARIF 2.1.0 schema.
+  schema-conformant (validated with the SARIF 2.1.0 JSON schema when the
+  optional `jsonschema` dependency and network are available).
 - **Posture diffing** (`diff.py`, `cryptoscan diff OLD NEW`). Fingerprint match
   with source move-detection; MIGRATION_LANDED / REGRESSION / PARTIAL / NO_CHANGE
   verdict; exits 2 on regression.

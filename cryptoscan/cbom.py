@@ -71,6 +71,16 @@ def _pqc_level(f: Finding) -> int:
         for param_set, category in PQC_PARAM_SETS.items():
             if param_set in low:
                 return category
+    # Hybrid groups (e.g. SecP384r1MLKEM1024) carry their strength via the
+    # fact's quantum_bits rather than a parameter-set token; map that to a
+    # category so the highest-security hybrid isn't under-reported as cat-3.
+    qb = f.fact.quantum_bits
+    if qb is not None:
+        if qb >= 192:
+            return 5
+        if qb >= 128:
+            return 3
+        return 1
     return 3
 
 

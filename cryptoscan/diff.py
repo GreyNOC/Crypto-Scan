@@ -67,6 +67,21 @@ def secondary_key(finding: dict) -> tuple:
             strip_line(finding.get("locator", "")))
 
 
+def _rank(severity: str) -> int:
+    try:
+        return Severity[severity].rank
+    except KeyError:
+        return 0
+
+
+def _escalated(old_f: dict, new_f: dict) -> bool:
+    """True if the relocated finding got *worse* — higher severity or newly
+    harvest-now-decrypt-later exposed. Such a 'move' is really a regression."""
+    if _rank(new_f.get("severity", "")) > _rank(old_f.get("severity", "")):
+        return True
+    return bool(new_f.get("hndl_exposed")) and not old_f.get("hndl_exposed")
+
+
 def diff_findings(old: list[dict], new: list[dict]) -> dict:
     old_ix = index_by_fingerprint(old)
     new_ix = index_by_fingerprint(new)
@@ -89,13 +104,18 @@ def diff_findings(old: list[dict], new: list[dict]) -> dict:
         f = new_ix[fp]
         if f.get("asset_type") == "source":
             bucket = old_sec.get(secondary_key(f))
-            if bucket:
+            if bucket and not _escalated(old_ix[bucket[0]], f):
                 ofp = bucket.pop(0)
                 consumed_old.add(ofp)
                 moved.append({"algorithm": f.get("algorithm"),
                               "from": old_ix[ofp].get("locator"),
                               "to": f.get("locator")})
                 continue
+            # A relocation that ALSO got worse (severity up, or now HNDL-exposed)
+            # is a regression, not a posture-neutral move. Consume the old entry
+            # and route the worse one to `introduced` so the verdict is correct.
+            if bucket:
+                consumed_old.add(bucket.pop(0))
         introduced.append(f)
     resolved = [old_ix[fp] for fp in resolved_fps if fp not in consumed_old]
 

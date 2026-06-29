@@ -154,8 +154,10 @@ def build_client_hello(server_name: str,
     # the value is not security-relevant for a probe).
     client_random = hashlib.sha256(b"greynoc-cryptoscan-probe").digest()
 
-    # server_name extension: ServerNameList -> entry(type=0 host_name + name)
-    name_bytes = server_name.encode("ascii", "ignore")
+    # server_name extension: ServerNameList -> entry(type=0 host_name + name).
+    # Clamp to the DNS max (253) so a pathological hostname can't overflow the
+    # 2-byte length vector.
+    name_bytes = server_name.encode("ascii", "ignore")[:253]
     sni_entry = b"\x00" + _vec(name_bytes, 2)
     sni_ext = _extension(_EXT_SERVER_NAME, _vec(sni_entry, 2))
 
@@ -305,7 +307,11 @@ def probe(host: str, port: int = 443, timeout: float = 8.0) -> TLS13Observation:
     """Probe a TLS endpoint for its negotiated TLS 1.3 group + PQC hybrid
     readiness. Returns a TLS13Observation; never raises."""
     obs = TLS13Observation(host=host, port=port)
-    res = _read_handshake(host, port, build_client_hello(host), timeout)
+    try:
+        res = _read_handshake(host, port, build_client_hello(host), timeout)
+    except Exception as exc:  # noqa: BLE001 — probe must never raise
+        obs.error = f"{type(exc).__name__}: {exc}"
+        return obs
     if res.error:
         # Any error -> discard. parse_server_hello already nulls partial state,
         # but never trust a result that also carries an error.

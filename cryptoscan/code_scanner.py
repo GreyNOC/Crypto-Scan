@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import stat
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -154,10 +155,12 @@ def _iter_source_files(root: Path):
             continue
         if p.suffix.lower() in SOURCE_EXTS:
             try:
-                if p.stat().st_size <= MAX_FILE_BYTES:
-                    yield p
+                st = p.stat()
             except OSError:
                 continue
+            # Skip non-regular files (FIFO/device/socket) so reading can't hang.
+            if stat.S_ISREG(st.st_mode) and st.st_size <= MAX_FILE_BYTES:
+                yield p
 
 
 def scan_source(root: Path) -> list[Finding]:
@@ -356,9 +359,11 @@ def scan_dependencies(root: Path) -> list[Finding]:
         if not parser:
             continue
         try:
-            if path.stat().st_size > MAX_FILE_BYTES:
-                continue  # don't load a pathologically large manifest into RAM
+            st = path.stat()
         except OSError:
+            continue
+        # Skip special files (FIFO/device) and pathologically large manifests.
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_FILE_BYTES:
             continue
         rel = (path.relative_to(root) if path.is_relative_to(root) else path).as_posix()
         try:
