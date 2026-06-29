@@ -296,6 +296,53 @@ def test_classical_x25519_still_critical_and_hndl():
     assert f.hndl_exposed() is True
 
 
+# --- Ecosystem discovery ---------------------------------------------------
+
+from cryptoscan import code_scanner as _cs
+
+
+def test_every_scanner_token_resolves_to_a_fact():
+    # Import-time correctness: no typo'd token in patterns/signatures.
+    for _pat, token, _desc in _cs.SOURCE_PATTERNS:
+        assert lookup(token) is not None, token
+    for name, token in _cs.DEP_SIGNATURES.items():
+        if token is not None:
+            assert lookup(token) is not None, (name, token)
+
+
+def test_multi_ecosystem_manifests_discovered():
+    sample = Path(__file__).resolve().parents[1] / "sample-target"
+    fs = _cs.scan(sample)
+    by_loc = {f.locator: f.fact.name for f in fs
+              if f.asset_type is AssetType.DEPENDENCY}
+    # Maven, composer, Gemfile, go.sum each surfaced at least one package.
+    assert any("pom.xml -> bcprov" in loc for loc in by_loc)
+    assert any("composer.json -> phpseclib/phpseclib" in loc for loc in by_loc)
+    assert any("Gemfile -> rbnacl" in loc for loc in by_loc)
+    assert any("go.sum -> btcec" in loc for loc in by_loc)
+
+
+def test_jose_and_java_source_patterns():
+    sample = Path(__file__).resolve().parents[1] / "sample-target"
+    fs = _cs.scan(sample)
+    names = {(f.locator.split(":")[0], f.fact.name) for f in fs
+             if f.asset_type is AssetType.SOURCE}
+    assert ("src/tokens.js", "HMAC") in names      # HS256
+    assert ("src/tokens.js", "RSA") in names        # RS256
+    assert ("src/tokens.js", "ECDSA") in names      # ES256
+    assert ("src/Signer.java", "RSA") in names      # KeyPairGenerator RSA
+    assert ("src/Signer.java", "ECDSA") in names    # withECDSA
+    assert ("src/Signer.java", "MD5") in names      # MD5
+
+
+def test_malformed_manifest_does_not_crash_scan(tmp_path):
+    (tmp_path / "pom.xml").write_text("<project><dependency>", encoding="utf-8")
+    (tmp_path / "composer.json").write_text("{ not json", encoding="utf-8")
+    # Must not raise; just yields no findings from the broken files.
+    fs = _cs.scan(tmp_path)
+    assert isinstance(fs, list)
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

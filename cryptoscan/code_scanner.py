@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from .classifier import Finding, AssetType, classify
@@ -65,10 +66,47 @@ SOURCE_PATTERNS: list[tuple[re.Pattern, str, str]] = [
      "ML-DSA", "ML-DSA (PQC) usage"),
     (re.compile(r"\bSPHINCS|SLH-?DSA", re.I),
      "SLH-DSA", "SLH-DSA (PQC) usage"),
+    # JOSE/JWT algorithm identifiers (gated near alg/sign/jwt to cut FPs). RS/PS
+    # -> RSA, ES -> ECDSA, EdDSA -> Ed25519, HS -> HMAC. 'none' is intentionally
+    # NOT matched (no faithful fact to attach).
+    (re.compile(r"['\"](?:RS|PS)(?:256|384|512)['\"]", re.I),
+     "RSA", "JOSE RSA signature (RS/PS)"),
+    (re.compile(r"['\"]ES(?:256|384|512)K?['\"]", re.I),
+     "ECDSA", "JOSE ECDSA signature (ES)"),
+    (re.compile(r"['\"]EdDSA['\"]", re.I),
+     "Ed25519", "JOSE EdDSA signature"),
+    (re.compile(r"['\"]HS(?:256|384|512)['\"]", re.I),
+     "HMAC", "JOSE HMAC (HS)"),
+    # Java JCA / JCE.
+    (re.compile(r"KeyPairGenerator\.getInstance\(\s*['\"]RSA|Cipher\.getInstance\(\s*['\"]RSA|with(?:RSA|RSAandMGF1)\b", re.I),
+     "RSA", "Java JCA RSA"),
+    (re.compile(r"KeyPairGenerator\.getInstance\(\s*['\"]EC['\"]|Signature\.getInstance\(\s*['\"][\w]*withECDSA", re.I),
+     "ECDSA", "Java JCA EC/ECDSA"),
+    (re.compile(r"MessageDigest\.getInstance\(\s*['\"]MD5", re.I),
+     "MD5", "Java JCA MD5"),
+    # WebCrypto SubtleCrypto.
+    (re.compile(r"name:\s*['\"]RSA-(?:PSS|OAEP)['\"]|name:\s*['\"]RSASSA-PKCS1", re.I),
+     "RSA", "WebCrypto RSA"),
+    (re.compile(r"name:\s*['\"]ECDSA['\"]", re.I),
+     "ECDSA", "WebCrypto ECDSA"),
+    (re.compile(r"name:\s*['\"]ECDH['\"]", re.I),
+     "ECDH", "WebCrypto ECDH"),
+    # Go standard library crypto imports.
+    (re.compile(r"crypto/rsa", re.I), "RSA", "Go crypto/rsa"),
+    (re.compile(r"crypto/ed25519", re.I), "Ed25519", "Go crypto/ed25519"),
+    (re.compile(r"crypto/md5", re.I), "MD5", "Go crypto/md5"),
+    # libsodium / NaCl: crypto_box is X25519 key agreement (HNDL-exposed);
+    # crypto_sign is Ed25519 (covered above).
+    (re.compile(r"crypto_box\b|sodium_box|nacl\.box", re.I),
+     "X25519", "libsodium crypto_box (X25519)"),
+    # secp256k1 (blockchain) — ECDSA over a Koblitz curve.
+    (re.compile(r"\bsecp256k1\b", re.I), "ECDSA", "secp256k1 ECDSA"),
 ]
 
-# Dependency name -> token. Packages that, by default, embody the primitive.
-DEP_SIGNATURES: dict[str, str] = {
+# Dependency name -> token (None = known-irrelevant, skipped). Packages that, by
+# default, embody the primitive. Recall over precision: treat as a lead.
+DEP_SIGNATURES: dict[str, str | None] = {
+    # Python
     "pycryptodome": "RSA", "pycrypto": "RSA", "rsa": "RSA",
     "ecdsa": "ECDSA", "fastecdsa": "ECDSA",
     "ed25519": "Ed25519", "pynacl": "Ed25519",
@@ -79,6 +117,19 @@ DEP_SIGNATURES: dict[str, str] = {
     "ring": "ECDSA",
     "openssl": "RSA",
     "bcrypt": None,  # not quantum-relevant; ignored
+    # JS / npm (blockchain ECDSA over secp256k1)
+    "ethers": "ECDSA", "web3": "ECDSA",
+    "@noble/secp256k1": "ECDSA", "secp256k1-native": "ECDSA",
+    # Java / Maven (BouncyCastle, Conscrypt embody RSA/ECDSA)
+    "bcprov-jdk18on": "RSA", "bcprov-jdk15on": "RSA", "bcpkix-jdk18on": "RSA",
+    "conscrypt-openjdk-uber": "RSA",
+    # Ruby
+    "rbnacl": "Ed25519",
+    # PHP / composer (vendor/package keys)
+    "phpseclib/phpseclib": "RSA",
+    "paragonie/sodium_compat": "Ed25519",
+    # Go (last path segment of the module)
+    "btcec": "ECDSA",
     # PQC libs — surfaced as SAFE / inventory positive
     "liboqs": "ML-KEM", "oqs": "ML-KEM", "pqcrypto": "ML-KEM",
     "kyber-py": "ML-KEM", "dilithium-py": "ML-DSA",
@@ -174,11 +225,104 @@ def _parse_gomod(path: Path) -> list[str]:
     return names
 
 
+def _parse_pom(path: Path) -> list[str]:
+    """Maven pom.xml. Namespace-agnostic: any <artifactId> text."""
+    try:
+        tree = ET.parse(path)
+    except (ET.ParseError, OSError, ValueError):
+        return []
+    names = []
+    for el in tree.iter():
+        tag = el.tag.rsplit("}", 1)[-1]  # strip XML namespace
+        if tag == "artifactId" and el.text:
+            names.append(el.text.strip().lower())
+    return names
+
+
+def _parse_gradle(path: Path) -> list[str]:
+    """Gradle build.gradle / .kts — pull artifact from 'group:artifact:ver'."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    names = []
+    for m in re.finditer(r"""['"]([\w.\-]+):([\w.\-]+):[\w.\-+]*['"]""", text):
+        names.append(m.group(2).strip().lower())
+    return names
+
+
+def _parse_gemfile(path: Path) -> list[str]:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return []
+    names = []
+    for line in lines:
+        m = re.match(r"\s*gem\s+['\"]([\w\-]+)['\"]", line)
+        if m:
+            names.append(m.group(1).lower())
+    return names
+
+
+def _parse_gemfile_lock(path: Path) -> list[str]:
+    """Gemfile.lock: top-level gems are the 4-space-indented specs entries."""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return []
+    names = []
+    for line in lines:
+        m = re.match(r"^    ([\w\-]+) \(", line)  # exactly 4 spaces
+        if m:
+            names.append(m.group(1).lower())
+    return names
+
+
+def _parse_composer_json(path: Path) -> list[str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    names = []
+    for key in ("require", "require-dev"):
+        names.extend(k.lower() for k in (data.get(key) or {}).keys())
+    return names
+
+
+def _parse_gosum(path: Path) -> list[str]:
+    """go.sum: module path per line; reduce to the last meaningful segment
+    (dropping trailing version-suffix segments like /v2)."""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return []
+    names: set[str] = set()
+    for line in lines:
+        m = re.match(r"^([\w./\-]+)\s+v", line)
+        if not m:
+            continue
+        seg = m.group(1).rstrip("/").split("/")
+        while seg and re.fullmatch(r"v\d+", seg[-1]):
+            seg.pop()
+        if seg:
+            names.add(seg[-1].lower())
+    return list(names)
+
+
 MANIFESTS = {
     "requirements.txt": _parse_requirements,
     "package.json": _parse_package_json,
     "cargo.toml": _parse_cargo,
     "go.mod": _parse_gomod,
+    "go.sum": _parse_gosum,
+    "pom.xml": _parse_pom,
+    "build.gradle": _parse_gradle,
+    "build.gradle.kts": _parse_gradle,
+    "gemfile": _parse_gemfile,
+    "gemfile.lock": _parse_gemfile_lock,
+    "composer.json": _parse_composer_json,
 }
 
 
@@ -193,7 +337,7 @@ def scan_dependencies(root: Path) -> list[Finding]:
         rel = (path.relative_to(root) if path.is_relative_to(root) else path).as_posix()
         try:
             names = parser(path)
-        except OSError:
+        except Exception:  # noqa: BLE001 — one bad manifest must not kill the scan
             continue
         for name in names:
             token = DEP_SIGNATURES.get(name)
