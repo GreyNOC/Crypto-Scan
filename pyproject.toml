@@ -20,6 +20,8 @@ validation = ["cyclonedx-python-lib[json-validation]>=8"]
 
 [project.scripts]
 cryptoscan = "cryptoscan.cli:main"
+gscan = "cryptoscan.cli:main"
+gs = "cryptoscan.cli:main"
 
 [tool.setuptools]
 packages = ["cryptoscan"]

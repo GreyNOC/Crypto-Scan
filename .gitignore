@@ -12,6 +12,11 @@ dist/
 .coverage
 htmlcov/
 
+# Build / release artifacts (PyInstaller portable build, release staging)
+portable/
+release-assets/
+*.spec
+
 # Virtual environments
 .venv/
 venv/
