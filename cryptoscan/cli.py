@@ -19,7 +19,8 @@ from pathlib import Path
 from . import __version__
 from .classifier import Finding, summarize
 from .primitives import Severity
-from . import tls_scanner, code_scanner, cbom as cbom_mod, report as report_mod
+from . import (tls_scanner, code_scanner, cbom as cbom_mod,
+               report as report_mod, sarif as sarif_mod)
 
 
 # Severity threshold the scan fails CI on. "none" never fails.
@@ -104,6 +105,11 @@ def _emit(findings: list[Finding], target: str, args) -> int:
                "findings": [f.to_dict() for f in findings]}
         _write_text(args.json, json.dumps(out, indent=2))
         print(f"[+] JSON written: {args.json}", file=sys.stderr)
+    if getattr(args, "sarif", None):
+        doc = sarif_mod.build_sarif(findings, target)
+        _write_text(args.sarif, json.dumps(doc, indent=2))
+        n = len(doc["runs"][0]["results"])
+        print(f"[+] SARIF written: {args.sarif}  ({n} results)", file=sys.stderr)
 
     # Console summary
     print(f"\n=== Posture: {target} ===")
@@ -134,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--cbom", metavar="FILE", help="write CycloneDX 1.6 CBOM")
         sp.add_argument("--report", metavar="FILE", help="write Markdown report")
         sp.add_argument("--json", metavar="FILE", help="write raw findings JSON")
+        sp.add_argument("--sarif", metavar="FILE",
+                        help="write SARIF 2.1.0 (GitHub code scanning)")
         sp.add_argument("--fail-on", choices=_GATE_CHOICES, default="critical",
                         metavar="{critical,high,medium,low,none}",
                         help="severity that makes the scan exit 2 to gate CI "

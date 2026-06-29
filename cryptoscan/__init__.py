@@ -8,11 +8,10 @@ migration roadmap.
 Authorized testing only. Reproducible findings. No fabrication.
 """
 
+from ._version import __version__
 from .classifier import Finding, classify, summarize, AssetType
 from .primitives import QuantumRisk, Severity, Primitive, lookup
 from . import tls_scanner, code_scanner, cbom, report
-
-__version__ = "0.1.0"
 
 __all__ = [
     "Finding", "classify", "summarize", "AssetType",

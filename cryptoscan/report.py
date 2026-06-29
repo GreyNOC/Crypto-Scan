@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from ._version import __version__
 from .classifier import Finding, summarize
 from .primitives import QuantumRisk, Severity
 
@@ -31,7 +32,7 @@ def render(findings: list[Finding], target: str) -> str:
     lines.append("")
     lines.append(f"**Target:** `{target}`  ")
     lines.append(f"**Generated:** {now}  ")
-    lines.append(f"**Scanner:** GreyNOC CryptoScan v0.1.0  ")
+    lines.append(f"**Scanner:** GreyNOC CryptoScan v{__version__}  ")
     lines.append(f"**Discipline:** authorized-testing-only · reproducible · no-fabrication")
     lines.append("")
     lines.append("---")

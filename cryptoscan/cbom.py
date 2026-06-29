@@ -7,9 +7,10 @@ existing SBOM/supply-chain tooling (Dependency-Track, etc.).
 
 Reference: CycloneDX 1.6 cryptography model — components[].cryptoProperties
 with assetType of algorithm | certificate | protocol | related-crypto-material.
-We emit `algorithm` and `certificate` assets, the two surfaces this MVP
-discovers, and annotate each with nistQuantumSecurityLevel and our own
-GreyNOC risk properties under the `properties` array.
+We emit `algorithm` assets (source/dep/cipher primitives), `certificate` assets
+(TLS leaf certs, with certificateProperties), and `protocol` assets (TLS
+endpoints, with version + cipherSuites), annotating each with
+nistQuantumSecurityLevel and our own GreyNOC risk properties.
 """
 
 from __future__ import annotations
@@ -20,21 +21,70 @@ from datetime import datetime, timezone
 from .classifier import Finding, AssetType
 from .primitives import Primitive, QuantumRisk
 
+from ._version import __version__
+
 CDX_SPEC = "1.6"
 TOOL_NAME = "GreyNOC CryptoScan"
 TOOL_VENDOR = "GreyNOC"
-TOOL_VERSION = "0.1.0"
+TOOL_VERSION = __version__
 
-# NIST PQC security categories 1-5; map our facts to a coarse level.
+# CycloneDX nistQuantumSecurityLevel: NIST PQC security strength categories.
+# 0 = offers no quantum security for its hard problem; 1..5 = NIST categories
+# (1≈AES-128 brute force, 3≈AES-192, 5≈AES-256). We only assert a category
+# where NIST actually pins one — Shor/Legacy primitives and bare hashes get 0.
 def _nist_level(f: Finding) -> int:
-    if f.fact.risk is QuantumRisk.SAFE:
-        return 3  # ML-KEM-768 / ML-DSA-65 / AES-256 class
-    return 0      # offers no quantum security for its hard problem
+    risk = f.fact.risk
+    if risk in (QuantumRisk.SHOR, QuantumRisk.LEGACY):
+        return 0
+    prim = f.fact.primitive
+    cb = f.fact.classical_bits
+    if prim in (Primitive.BLOCK_CIPHER, Primitive.STREAM_CIPHER):
+        if cb is None:
+            return 0
+        if cb >= 256:
+            return 5
+        if cb >= 192:
+            return 3
+        if cb >= 128:
+            return 1
+        return 0
+    if prim in (Primitive.HASH, Primitive.MAC):
+        return 0  # NIST does not pin bare hashes/MACs to a PQC category
+    if risk is QuantumRisk.SAFE and prim in (
+            Primitive.PKE, Primitive.SIGNATURE, Primitive.KEY_AGREE):
+        return _pqc_level(f)
+    return 0
+
+
+def _pqc_level(f: Finding) -> int:
+    """Standardized-PQC category, param-set-aware where the set is known.
+
+    Default to the recommended category-3 sets (ML-KEM-768 / ML-DSA-65) when no
+    parameter set is observed — those are CryptoScan's own migration targets.
+    """
+    tag = f"{f.fact.name} {f.parameter or ''}".lower()
+    if any(x in tag for x in ("1024", "-87", "256s", "256f")):
+        return 5
+    if "512" in tag or "-44" in tag:
+        return 2 if "dsa" in tag else 1
+    return 3
 
 
 def _primitive_to_cdx(p: Primitive) -> str:
     # CycloneDX uses these exact primitive tokens.
     return p.value
+
+
+# OpenSSL/ssl protocol version string -> CycloneDX protocolProperties.version.
+def _tls_version(protocol: str) -> str:
+    return {
+        "TLSv1.3": "1.3", "TLSv1.2": "1.2", "TLSv1.1": "1.1",
+        "TLSv1": "1.0", "SSLv3": "3.0", "SSLv2": "2.0",
+    }.get(protocol, protocol)
+
+
+# CycloneDX cryptoFunctions vocabulary roles by suite token role.
+_SUITE_ROLES = {"key-exchange", "authentication", "bulk-cipher", "mac"}
 
 
 def _algorithm_component(f: Finding) -> dict:
@@ -64,31 +114,72 @@ def _algorithm_component(f: Finding) -> dict:
 
 
 def _certificate_component(f: Finding) -> dict:
-    """A cert-borne key/signature algorithm.
+    """A TLS leaf certificate, modeled as a CycloneDX `certificate` asset.
 
-    Modeled as an `algorithm` asset (the thing we actually inventory), with the
-    certificate subject/issuer carried in evidence + properties. This keeps the
-    component schema-valid under CycloneDX 1.6 while preserving cert context.
+    Carries certificateProperties (subject/issuer/validity/format) when we
+    observed them, and the GreyNOC risk annotations for the cert's key/signature
+    algorithm. We do not emit dangling signatureAlgorithmRef/subjectPublicKeyRef
+    bom-refs — the algorithm identity lives in the component name + properties,
+    so there is nothing to dangle.
     """
-    comp = _algorithm_component(f)
-    subject = (f.extra or {}).get("subject")
-    issuer = (f.extra or {}).get("issuer")
-    if subject:
-        comp["properties"].append(
-            {"name": "greynoc:certSubject", "value": str(subject)[:200]})
-    if issuer:
-        comp["properties"].append(
-            {"name": "greynoc:certIssuer", "value": str(issuer)[:200]})
-    comp["properties"].append(
-        {"name": "greynoc:assetRole", "value": "certificate"})
-    return comp
+    ex = f.extra or {}
+    certprops: dict = {"certificateFormat": "X.509"}
+    for src, dst, cap in (
+        ("subject", "subjectName", 300),
+        ("issuer", "issuerName", 300),
+        ("not_before", "notValidBefore", 64),
+        ("not_after", "notValidAfter", 64),
+    ):
+        v = ex.get(src)
+        if v:
+            certprops[dst] = str(v)[:cap]
+    return {
+        "type": "cryptographic-asset",
+        "bom-ref": f"crypto/{f.fingerprint}",
+        "name": f.fact.name,
+        "cryptoProperties": {
+            "assetType": "certificate",
+            "certificateProperties": certprops,
+        },
+        "evidence": {"occurrences": [{"location": f.locator}]},
+        "properties": _greynoc_properties(f) + [
+            {"name": "greynoc:assetRole", "value": "certificate"},
+        ],
+    }
+
+
+def _protocol_component(locator: str, protocol: str | None,
+                        cipher_suites: list[str]) -> dict:
+    """A TLS endpoint, modeled as a CycloneDX `protocol` asset."""
+    pp: dict = {"type": "tls"}
+    if protocol:
+        pp["version"] = _tls_version(protocol)
+    if cipher_suites:
+        pp["cipherSuites"] = [{"name": cs} for cs in cipher_suites]
+    name = f"TLS {_tls_version(protocol)}".strip() if protocol else "TLS"
+    return {
+        "type": "cryptographic-asset",
+        "bom-ref": f"crypto/protocol/{locator}",
+        "name": name,
+        "cryptoProperties": {
+            "assetType": "protocol",
+            "protocolProperties": pp,
+        },
+        "evidence": {"occurrences": [{"location": locator}]},
+        "properties": [
+            {"name": "greynoc:assetType", "value": "tls-endpoint"},
+            {"name": "greynoc:locator", "value": locator},
+        ],
+    }
 
 
 def _crypto_functions(f: Finding) -> list[str]:
+    # Values MUST come from the CycloneDX cryptoFunctions enum. Note 'keyderive'
+    # (no hyphen) is the schema token; 'key-agreement' is NOT valid.
     p = f.fact.primitive
     return {
         Primitive.PKE: ["encapsulate", "decapsulate"],
-        Primitive.KEY_AGREE: ["keygen", "key-agreement"],
+        Primitive.KEY_AGREE: ["keygen", "keyderive"],
         Primitive.SIGNATURE: ["sign", "verify"],
         Primitive.BLOCK_CIPHER: ["encrypt", "decrypt"],
         Primitive.STREAM_CIPHER: ["encrypt", "decrypt"],
@@ -122,6 +213,10 @@ def _greynoc_properties(f: Finding) -> list[dict]:
 def build_cbom(findings: list[Finding], target: str) -> dict:
     components = []
     seen: set[str] = set()
+    # Collect TLS endpoints that carry real protocol data, so we can emit one
+    # `protocol` asset per endpoint. Gated on observed protocol -> a synthetic
+    # TLS finding with no protocol context produces no protocol component.
+    endpoints: dict[str, dict] = {}
     for f in findings:
         if f.fingerprint in seen:
             continue
@@ -131,6 +226,18 @@ def build_cbom(findings: list[Finding], target: str) -> dict:
             components.append(_certificate_component(f))
         else:
             components.append(_algorithm_component(f))
+        if f.asset_type is AssetType.TLS_ENDPOINT:
+            ex = f.extra or {}
+            proto = ex.get("protocol")
+            if proto:
+                ep = endpoints.setdefault(
+                    f.locator, {"protocol": proto, "suites": set()})
+                if ex.get("role") in _SUITE_ROLES and f.evidence:
+                    ep["suites"].add(f.evidence)
+
+    for locator, info in endpoints.items():
+        components.append(_protocol_component(
+            locator, info["protocol"], sorted(info["suites"])))
 
     return {
         "bomFormat": "CycloneDX",

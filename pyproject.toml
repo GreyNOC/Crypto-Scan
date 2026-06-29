@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "greynoc-cryptoscan"
-version = "0.1.0"
-description = "GreyNOC CryptoScan — Cryptographic Posture Management & PQC migration scanner (CBOM generator)"
+version = "0.2.0"
+description = "GreyNOC CryptoScan — Cryptographic Posture Management & PQC migration scanner (CBOM + Mosca risk engine)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Proprietary — GreyNOC" }
