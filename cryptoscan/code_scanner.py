@@ -234,13 +234,25 @@ def _parse_gomod(path: Path) -> list[str]:
 
 
 def _parse_pom(path: Path) -> list[str]:
-    """Maven pom.xml. Namespace-agnostic: any <artifactId> text."""
+    """Maven pom.xml. Namespace-agnostic: any <artifactId> text.
+
+    Rejects XML that declares a DTD or entities — a Maven POM never needs them,
+    and parsing them would expose the scanner to entity-expansion (billion-
+    laughs) denial-of-service from a hostile manifest in scanned code.
+    """
     try:
-        tree = ET.parse(path)
-    except (ET.ParseError, OSError, ValueError):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    low = text.lower()
+    if "<!doctype" in low or "<!entity" in low:
+        return []
+    try:
+        root = ET.fromstring(text)
+    except (ET.ParseError, ValueError):
         return []
     names = []
-    for el in tree.iter():
+    for el in root.iter():
         tag = el.tag.rsplit("}", 1)[-1]  # strip XML namespace
         if tag == "artifactId" and el.text:
             names.append(el.text.strip().lower())
@@ -342,6 +354,11 @@ def scan_dependencies(root: Path) -> list[Finding]:
             continue
         parser = MANIFESTS.get(path.name.lower())
         if not parser:
+            continue
+        try:
+            if path.stat().st_size > MAX_FILE_BYTES:
+                continue  # don't load a pathologically large manifest into RAM
+        except OSError:
             continue
         rel = (path.relative_to(root) if path.is_relative_to(root) else path).as_posix()
         try:

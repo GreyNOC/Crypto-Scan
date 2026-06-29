@@ -644,6 +644,27 @@ def test_parse_server_hello_never_raises_on_random_bytes():
         assert r is not None
 
 
+def test_pom_parser_rejects_entity_expansion(tmp_path):
+    # billion-laughs: a hostile pom.xml must not expand entities (DoS).
+    (tmp_path / "pom.xml").write_text(
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE lolz [\n'
+        ' <!ENTITY lol "lol">\n'
+        ' <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">\n'
+        ']>\n'
+        '<project><dependencies><dependency>'
+        '<artifactId>&lol2;</artifactId></dependency></dependencies></project>',
+        encoding="utf-8")
+    names = _cs._parse_pom(tmp_path / "pom.xml")
+    assert names == []                      # DTD/entity -> refused, no expansion
+    # A normal pom still parses.
+    (tmp_path / "pom2.xml").write_text(
+        '<project><dependencies><dependency>'
+        '<artifactId>bcprov-jdk18on</artifactId>'
+        '</dependency></dependencies></project>', encoding="utf-8")
+    assert _cs._parse_pom(tmp_path / "pom2.xml") == ["bcprov-jdk18on"]
+
+
 if __name__ == "__main__":
     import inspect
     import traceback
