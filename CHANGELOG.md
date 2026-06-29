@@ -3,7 +3,52 @@
 All notable changes to GreyNOC CryptoScan are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.2.0] — the decision-engine release
+
+The leap from inventory tool to decision engine. Default output (no new flags)
+stays v0.1.0-shaped except for the enriched CBOM; all new analysis is opt-in.
+The 15 v0.1.0 regression tests stay green; 62 tests total.
+
+### Added
+- **Mosca Risk Engine** (`mosca.py`, `--mosca`). Applies Mosca's inequality
+  `X + Y > Z` (data secrecy lifetime + migration time vs years-to-CRQC) per
+  finding and as an aggregate, with PLAN/MONITOR/ACT-NOW urgency, scenario
+  sensitivity, and a cited, fully overridable parameter set (`.basis()`).
+- **Live TLS 1.3 key-exchange group probe** (`tls13_probe.py`). Hand-built
+  ClientHello + ServerHello/HelloRetryRequest parser captures the negotiated
+  group and detects PQC hybrids (X25519MLKEM768, SecP256r1MLKEM768, …) — closing
+  the v0.1.0 "TLS 1.3 KEX group not captured" limitation. No new dependency
+  (dummy key shares; only the 2-byte selected group is read). Verified live
+  against Cloudflare/Google (→ X25519MLKEM768).
+- **SARIF 2.1.0 output** (`sarif.py`, `--sarif`) for GitHub code scanning;
+  validated against the SARIF 2.1.0 schema.
+- **Posture diffing** (`diff.py`, `cryptoscan diff OLD NEW`). Fingerprint match
+  with source move-detection; MIGRATION_LANDED / REGRESSION / PARTIAL / NO_CHANGE
+  verdict; exits 2 on regression.
+- **Parameter-aware severity**: a sub-112-bit key/curve (RSA-1024, secp192r1) is
+  flagged `classically_weak` on top of its quantum risk (NIST SP 800-57 strength
+  tables, curve facts).
+- **Knowledge-base expansion**: per-group hybrid KEX facts, HMAC MAC fact, JOSE/
+  COSE algorithm map (`jose_alg`), PQC parameter-set → NIST category table, more
+  curves. `strength_for` / `curve_fact` / `pqc_category` helpers.
+- **Seven-ecosystem dependency discovery**: Maven `pom.xml`, Gradle, Ruby
+  `Gemfile`(`.lock`), PHP `composer.json`, `go.sum`, plus JOSE/JWT/JCA/WebCrypto
+  source patterns — each manifest parser isolates its own parse errors.
+- **Enriched CBOM**: TLS leaf certs as CycloneDX `certificate` assets (validity,
+  subject/issuer) and TLS endpoints as `protocol` assets (version + cipher
+  suites); param/shape-aware `nistQuantumSecurityLevel`. Validated against the
+  CycloneDX 1.6 **strict** schema in CI.
+
+### Fixed
+- **CBOM emitted an invalid `key-agreement` cryptoFunctions token** — corrected
+  to the schema's `keyderive`; `nistQuantumSecurityLevel` no longer hardcoded to
+  3 for every PQ-safe asset.
+- **Mis-aliased `x25519kyber768`** sat on the X25519 (Shor) fact; relocated to a
+  proper PQ-safe hybrid fact. Corrected the `RFC 9370` citation (an IKEv2 doc) to
+  `draft-ietf-tls-ecdhe-mlkem`.
+- Version is now single-sourced in `_version.py` (no more 0.1.0 split-brain).
+
+## [0.1.x]
 
 ### Fixed
 - **Reproducible fingerprints across operating systems.** Source and dependency

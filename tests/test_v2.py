@@ -169,6 +169,35 @@ def test_cbom_certificate_asset_modeled_as_certificate():
     assert cp["certificateProperties"]["notValidBefore"].startswith("2025")
 
 
+def test_cbom_validates_against_cyclonedx_1_6_strict_schema():
+    # Gated on the optional [validation] extra; a no-op when it isn't installed.
+    try:
+        from cyclonedx.validation.json import JsonStrictValidator
+        from cyclonedx.schema import SchemaVersion
+    except ImportError:
+        return
+    import json
+    fs = [
+        classify("ECDHE", AssetType.TLS_ENDPOINT, "h:443",
+                 evidence="ECDHE-RSA-AES256-GCM-SHA384", key_establishment=True,
+                 extra={"protocol": "TLSv1.2", "role": "key-exchange"}),
+        classify("AES-256", AssetType.TLS_ENDPOINT, "h:443",
+                 evidence="ECDHE-RSA-AES256-GCM-SHA384",
+                 extra={"protocol": "TLSv1.2", "role": "bulk-cipher"}),
+        classify("RSA", AssetType.CERTIFICATE, "h:443", key_establishment=True,
+                 parameter="2048",
+                 extra={"subject": "CN=example.com", "issuer": "CN=CA",
+                        "not_before": "2025-01-01T00:00:00+00:00"}),
+        classify("x25519mlkem768", AssetType.TLS_ENDPOINT, "h:443",
+                 key_establishment=True),
+        classify("MD5", AssetType.SOURCE, "src/a.py:3"),
+    ]
+    doc = cbom_mod.build_cbom(fs, "validation-target")
+    errors = JsonStrictValidator(SchemaVersion.V1_6).validate_str(
+        json.dumps(doc))
+    assert errors is None, errors
+
+
 def test_cbom_no_protocol_component_without_protocol_data():
     # The v0.1.0 fixture: a TLS finding with no protocol context must NOT
     # spawn a protocol component (keeps the count-2 core test honest).
