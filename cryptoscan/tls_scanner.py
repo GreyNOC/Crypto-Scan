@@ -1,0 +1,182 @@
+"""
+GreyNOC CryptoScan — TLS / certificate discovery surface.
+
+Performs an authorized handshake against a target host:port, then extracts
+the cryptography actually in use: negotiated protocol version, cipher suite
+(broken into KEX / cipher / MAC where derivable), and the leaf certificate's
+public-key algorithm, key size, and signature algorithm.
+
+AUTHORIZED TESTING ONLY. This module performs a standard TLS handshake — the
+same traffic any client sends — and reads the server-presented certificate.
+It does not attempt exploitation. Operators are responsible for ensuring they
+have authorization to scan the target.
+"""
+
+from __future__ import annotations
+
+import socket
+import ssl
+from dataclasses import dataclass
+
+from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import rsa, ec, dsa, ed25519, ed448
+
+from .classifier import Finding, AssetType, classify
+
+
+@dataclass
+class TLSObservation:
+    host: str
+    port: int
+    protocol: str | None = None
+    cipher_name: str | None = None
+    cipher_bits: int | None = None
+    cert_subject: str | None = None
+    cert_issuer: str | None = None
+    cert_sig_algo: str | None = None
+    key_algo: str | None = None
+    key_size: int | None = None
+    key_curve: str | None = None
+    error: str | None = None
+
+
+# Map negotiated cipher-suite name fragments to primitive tokens.
+def _cipher_tokens(cipher_name: str) -> list[tuple[str, str]]:
+    """Return (token, evidence-role) pairs from an OpenSSL cipher name."""
+    name = cipher_name.upper()
+    tokens: list[tuple[str, str]] = []
+
+    # Key exchange
+    if "ECDHE" in name or "ECDH" in name:
+        tokens.append(("ECDHE", "key-exchange"))
+    elif "DHE" in name or "EDH" in name:
+        tokens.append(("DHE", "key-exchange"))
+    elif name.startswith("TLS_") and "GCM" in name:
+        # TLS 1.3 suites (TLS_AES_256_GCM_SHA384 etc.) use the negotiated
+        # group separately; KEX is reported via the group, not the suite.
+        pass
+
+    # Authentication (cert-based, surfaced from the cert itself too)
+    if "RSA" in name:
+        tokens.append(("RSA", "authentication"))
+    if "ECDSA" in name:
+        tokens.append(("ECDSA", "authentication"))
+
+    # Bulk cipher
+    if "AES_256" in name or "AES256" in name:
+        tokens.append(("AES-256", "bulk-cipher"))
+    elif "AES_128" in name or "AES128" in name:
+        tokens.append(("AES-128", "bulk-cipher"))
+    elif "CHACHA20" in name:
+        tokens.append(("CHACHA20", "bulk-cipher"))
+    elif "3DES" in name or "DES_EDE3" in name:
+        tokens.append(("3DES", "bulk-cipher"))
+    elif "RC4" in name:
+        tokens.append(("RC4", "bulk-cipher"))
+
+    # MAC / PRF hash
+    if "SHA384" in name:
+        tokens.append(("SHA-384", "mac"))
+    elif "SHA256" in name:
+        tokens.append(("SHA-256", "mac"))
+    elif name.endswith("SHA") or "_SHA" in name:
+        tokens.append(("SHA-1", "mac"))
+
+    return tokens
+
+
+def _key_details(cert: x509.Certificate) -> tuple[str, int | None, str | None]:
+    pk = cert.public_key()
+    if isinstance(pk, rsa.RSAPublicKey):
+        return "RSA", pk.key_size, None
+    if isinstance(pk, ec.EllipticCurvePublicKey):
+        return "ECDSA", pk.curve.key_size, pk.curve.name
+    if isinstance(pk, dsa.DSAPublicKey):
+        return "DSA", pk.key_size, None
+    if isinstance(pk, ed25519.Ed25519PublicKey):
+        return "EdDSA", 256, "ed25519"
+    if isinstance(pk, ed448.Ed448PublicKey):
+        return "EdDSA", 448, "ed448"
+    return type(pk).__name__, None, None
+
+
+def probe(host: str, port: int = 443, timeout: float = 8.0) -> TLSObservation:
+    """Perform one authorized TLS handshake and read the leaf certificate."""
+    obs = TLSObservation(host=host, port=port)
+    ctx = ssl.create_default_context()
+    # We inspect what the server offers; do not fail the probe on trust issues.
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as tls:
+                obs.protocol = tls.version()
+                cipher = tls.cipher()
+                if cipher:
+                    obs.cipher_name, _, obs.cipher_bits = cipher
+                der = tls.getpeercert(binary_form=True)
+                if der:
+                    cert = x509.load_der_x509_certificate(der)
+                    try:
+                        obs.cert_subject = cert.subject.rfc4514_string()
+                        obs.cert_issuer = cert.issuer.rfc4514_string()
+                    except Exception:
+                        pass
+                    try:
+                        obs.cert_sig_algo = cert.signature_algorithm_oid._name
+                    except Exception:
+                        obs.cert_sig_algo = None
+                    obs.key_algo, obs.key_size, obs.key_curve = _key_details(cert)
+    except Exception as exc:  # noqa: BLE001 — report, don't crash the scan
+        obs.error = f"{type(exc).__name__}: {exc}"
+    return obs
+
+
+def scan(host: str, port: int = 443, timeout: float = 8.0) -> list[Finding]:
+    """Probe a TLS endpoint and emit classified Findings."""
+    obs = probe(host, port, timeout)
+    findings: list[Finding] = []
+    locator = f"{host}:{port}"
+    if obs.error:
+        return findings
+
+    # Cipher-suite-derived primitives.
+    if obs.cipher_name:
+        for token, role in _cipher_tokens(obs.cipher_name):
+            f = classify(
+                token, AssetType.TLS_ENDPOINT, locator,
+                evidence=obs.cipher_name,
+                key_establishment=(role == "key-exchange"),
+                # Transport key exchange is treated as long-lived-data exposed:
+                # captured ciphertext is decryptable once the KEX is broken.
+                long_lived_data=(role == "key-exchange"),
+                extra={"protocol": obs.protocol, "role": role,
+                       "cipher_bits": obs.cipher_bits},
+            )
+            if f:
+                findings.append(f)
+
+    # Certificate public key (authentication / identity).
+    if obs.key_algo:
+        f = classify(
+            obs.key_algo, AssetType.CERTIFICATE, locator,
+            evidence=f"{obs.key_algo}-{obs.key_size or '?'}"
+                     f"{'/' + obs.key_curve if obs.key_curve else ''}",
+            parameter=str(obs.key_size) if obs.key_size else obs.key_curve,
+            extra={"subject": obs.cert_subject, "issuer": obs.cert_issuer,
+                   "curve": obs.key_curve},
+        )
+        if f:
+            findings.append(f)
+
+    # Certificate signature algorithm (chain-of-trust integrity).
+    if obs.cert_sig_algo:
+        f = classify(
+            obs.cert_sig_algo, AssetType.CERTIFICATE, locator,
+            evidence=obs.cert_sig_algo,
+            extra={"role": "cert-signature", "subject": obs.cert_subject},
+        )
+        if f:
+            findings.append(f)
+
+    return findings
