@@ -945,6 +945,99 @@ def test_pki_scan_classifies_certs_and_keys(tmp_path):
     assert any(f.fact.name == "ECDSA" for f in fs)  # EC key file
 
 
+# --- IPsec / IKEv2 endpoint scanning ---------------------------------------
+
+from cryptoscan import ike_scanner as _ike
+
+
+def _ike_response(transforms, *, flags=0x20):
+    """Build an IKE_SA_INIT response with one chosen proposal (for parse tests).
+    transforms: list of (ttype, tid, keybits|None)."""
+    trs = b""
+    for i, (tt, tid, kb) in enumerate(transforms):
+        last = (i == len(transforms) - 1)
+        attrs = struct.pack(">HH", 0x800E, kb) if kb else b""
+        trs += struct.pack(">BBHBBH", 0 if last else 3, 0, 8 + len(attrs),
+                           tt, 0, tid) + attrs
+    prop = struct.pack(">BBHBBBB", 0, 0, 8 + len(trs), 1, 1, 0,
+                       len(transforms)) + trs
+    sa = struct.pack(">BBH", 0, 0, 4 + len(prop)) + prop
+    hdr = struct.pack(">8s8sBBBBII", b"A" * 8, b"B" * 8, 33, 0x20, 34, flags,
+                      0, 28 + len(sa))
+    return hdr + sa
+
+
+def test_ike_tokens_resolve():
+    toks = {t for t, _ in _ike.DH_GROUPS.values()}
+    toks |= {v for v in _ike._ENCR.values() if v != "AES"}
+    toks |= set(_ike._PRF.values()) | set(_ike._INTEG.values())
+    for t in toks:
+        assert lookup(t) is not None, t
+
+
+def test_ike_build_request_is_valid():
+    req = _ike.build_ike_sa_init()
+    nxt, ver, exch, flags = struct.unpack_from(">xxxxxxxxxxxxxxxxBBBB", req, 0)
+    assert nxt == 33 and ver == 0x20 and exch == 34 and flags == 0x08
+    assert struct.unpack_from(">I", req, 24)[0] == len(req)   # length backfilled
+
+
+def test_ike_parse_and_classify_negotiated_set(monkeypatch):
+    # Responder chose: AES-256-GCM, HMAC-SHA2-256 PRF, HMAC-SHA2-256-128, Curve25519
+    resp = _ike_response([(1, 20, 256), (2, 5, None), (3, 12, None), (4, 31, None)])
+    o = _ike.parse_response(resp)
+    assert o.is_response and o.encryption == ("AES", 256) and o.dh_group == 31
+    monkeypatch.setattr(_ike, "probe", lambda *a, **k: _replace_host(o))
+    by = {f.fact.name: f for f in _ike.scan("h", 500)}
+    assert by["X25519"].hndl_exposed() and by["X25519"].severity() is Severity.CRITICAL
+    assert by["AES-256"].fact.risk is QuantumRisk.SAFE
+    assert "HMAC" in by
+
+
+def _replace_host(o):
+    o.host, o.port = "h", 500
+    return o
+
+
+def test_ike_weak_modp_group_is_classically_weak(monkeypatch):
+    o = _ike.IKEObservation(host="h", port=500, is_response=True, dh_group=2)
+    monkeypatch.setattr(_ike, "probe", lambda *a, **k: o)
+    dh = next(f for f in _ike.scan("h", 500) if f.fact.name == "DH")
+    assert dh.classical_weakness() is True       # MODP-1024 = 80-bit
+    assert dh.severity() is Severity.CRITICAL
+
+
+def test_ike_mlkem_group_is_pq_safe(monkeypatch):
+    o = _ike.IKEObservation(host="h", port=500, is_response=True, dh_group=36)
+    monkeypatch.setattr(_ike, "probe", lambda *a, **k: o)
+    f = next(f for f in _ike.scan("h", 500) if f.fact.name == "ML-KEM")
+    assert f.fact.risk is QuantumRisk.SAFE and f.hndl_exposed() is False
+
+
+def test_ike_invalid_ke_payload_yields_preferred_group():
+    # Notify(INVALID_KE_PAYLOAD=17) carrying preferred group 19 (ECP-256).
+    nd = struct.pack(">H", 19)
+    notify = struct.pack(">BBH", 0, 0, 17) + nd
+    body = struct.pack(">BBH", 0, 0, 4 + len(notify)) + notify
+    hdr = struct.pack(">8s8sBBBBII", b"A" * 8, b"B" * 8, 41, 0x20, 34, 0x20,
+                      0, 28 + len(body))
+    o = _ike.parse_response(hdr + body)
+    assert o.notify == 17 and o.preferred_group == 19
+
+
+def test_ike_parse_never_raises_on_garbage():
+    for b in (b"", b"\x00" * 28, bytes(range(60)), b"\xff" * 40):
+        _ike.parse_response(b)   # must not raise (returns None or an obs)
+
+
+def test_ike_null_encryption_is_flagged(monkeypatch):
+    o = _ike.IKEObservation(host="h", port=500, is_response=True,
+                            encryption=("null", None))
+    monkeypatch.setattr(_ike, "probe", lambda *a, **k: o)
+    f = next(f for f in _ike.scan("h", 500) if "NULL" in f.fact.name)
+    assert f.severity() is Severity.HIGH        # plaintext IPsec
+
+
 if __name__ == "__main__":
     import inspect
     import traceback

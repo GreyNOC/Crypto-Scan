@@ -293,6 +293,18 @@ _reg(CryptoFact("UMAC", Primitive.MAC, QuantumRisk.SAFE, 128, 128,
                      "integrity floor."),
      "umac", "umac-128", "umac-128@openssh.com", "umac-64", "umac-64@openssh.com")
 
+_reg(CryptoFact("AES-XCBC", Primitive.MAC, QuantumRisk.SAFE, 128, 64,
+                note="AES-128-based MAC (XCBC RFC 3566 / CMAC RFC 4493). "
+                     "Strength bounded by the 128-bit AES key."),
+     "aes-xcbc", "aes128-xcbc", "aes-cmac", "aes128-cmac")
+
+# Absence of confidentiality is itself a finding (IPsec ENCR_NULL, RFC 2410).
+_reg(CryptoFact("NULL-ENCRYPTION", Primitive.OTHER, QuantumRisk.LEGACY, 0, 0,
+                note="No confidentiality — ENCR_NULL (RFC 2410); traffic is "
+                     "plaintext. Not a weakness of an algorithm, the absence "
+                     "of one."),
+     "null", "null-encryption", "encr_null")
+
 # --- PQC standardized: safe ------------------------------------------------
 _reg(CryptoFact("ML-KEM", Primitive.PKE, QuantumRisk.SAFE,
                 standard="FIPS 203",

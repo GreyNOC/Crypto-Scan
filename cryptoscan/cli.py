@@ -19,7 +19,7 @@ from pathlib import Path
 from . import __version__
 from .classifier import Finding, summarize
 from .primitives import Severity
-from . import (tls_scanner, ssh_scanner, code_scanner, pki_scanner,
+from . import (tls_scanner, ssh_scanner, ike_scanner, code_scanner, pki_scanner,
                cbom as cbom_mod, report as report_mod, sarif as sarif_mod,
                mosca as mosca_mod, diff as diff_mod)
 from .mosca import MoscaParameters, DataTier, ZScenario
@@ -171,6 +171,25 @@ def _run_ssh(targets: list[str]) -> list[Finding]:
     return findings
 
 
+def _run_ike(targets: list[str]) -> list[Finding]:
+    findings: list[Finding] = []
+    for t in targets:
+        try:
+            host, port = _parse_target(t, default_port=500)
+        except ValueError as exc:
+            print(f"    ! skipping {exc}", file=sys.stderr)
+            continue
+        print(f"[*] IKEv2 IKE_SA_INIT probe: {host}:{port}", file=sys.stderr)
+        obs = ike_scanner.probe(host, port)
+        if obs.error and obs.dh_group is None and obs.preferred_group is None:
+            print(f"    ! {obs.error}", file=sys.stderr)
+            continue
+        print(f"    response={obs.is_response} dh_group={obs.dh_group} "
+              f"enc={obs.encryption}", file=sys.stderr)
+        findings.extend(ike_scanner.scan(host, port))
+    return findings
+
+
 def _run_code(path: str) -> list[Finding]:
     print(f"[*] Static crypto discovery: {path}", file=sys.stderr)
     findings = code_scanner.scan(path)
@@ -276,14 +295,19 @@ def main(argv: list[str] | None = None) -> int:
     sp_ssh.add_argument("targets", nargs="+", metavar="HOST[:PORT]")
     _add_outputs(sp_ssh)
 
+    sp_ike = sub.add_parser("ike", help="scan IPsec/IKEv2 endpoint(s)")
+    sp_ike.add_argument("targets", nargs="+", metavar="HOST[:PORT]")
+    _add_outputs(sp_ike)
+
     sp_code = sub.add_parser("code", help="scan a source/dependency tree")
     sp_code.add_argument("path")
     _add_outputs(sp_code)
 
-    sp_scan = sub.add_parser("scan", help="combined code + TLS + SSH scan")
+    sp_scan = sub.add_parser("scan", help="combined code + TLS + SSH + IKE scan")
     sp_scan.add_argument("path")
     sp_scan.add_argument("--tls", nargs="+", default=[], metavar="HOST[:PORT]")
     sp_scan.add_argument("--ssh", nargs="+", default=[], metavar="HOST[:PORT]")
+    sp_scan.add_argument("--ike", nargs="+", default=[], metavar="HOST[:PORT]")
     _add_outputs(sp_scan)
 
     sp_diff = sub.add_parser(
@@ -308,13 +332,18 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "ssh":
         findings = _run_ssh(args.targets)
         target = ", ".join(args.targets)
+    elif args.cmd == "ike":
+        findings = _run_ike(args.targets)
+        target = ", ".join(args.targets)
     elif args.cmd == "code":
         findings = _run_code(args.path)
         target = args.path
     else:  # scan
-        findings = _run_code(args.path) + _run_tls(args.tls) + _run_ssh(args.ssh)
+        findings = (_run_code(args.path) + _run_tls(args.tls)
+                    + _run_ssh(args.ssh) + _run_ike(args.ike))
         extras = (([f", {', '.join(args.tls)}"] if args.tls else [])
-                  + ([f", {', '.join(args.ssh)}"] if args.ssh else []))
+                  + ([f", {', '.join(args.ssh)}"] if args.ssh else [])
+                  + ([f", {', '.join(args.ike)}"] if args.ike else []))
         target = f"{args.path}" + "".join(extras)
 
     return _emit(findings, target, args)

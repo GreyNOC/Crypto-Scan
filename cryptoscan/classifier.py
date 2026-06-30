@@ -24,6 +24,7 @@ from .primitives import (CryptoFact, Primitive, QuantumRisk, Severity,
 class AssetType(str, Enum):
     TLS_ENDPOINT = "tls-endpoint"
     SSH_ENDPOINT = "ssh-endpoint"
+    IKE_ENDPOINT = "ike-endpoint"
     CERTIFICATE = "certificate"
     SOURCE = "source"
     DEPENDENCY = "dependency"

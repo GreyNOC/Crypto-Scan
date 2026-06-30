@@ -11,13 +11,13 @@ Authorized testing only. Reproducible findings. No fabrication.
 from ._version import __version__
 from .classifier import Finding, classify, summarize, AssetType
 from .primitives import QuantumRisk, Severity, Primitive, lookup
-from . import (tls_scanner, tls13_probe, ssh_scanner, code_scanner,
-               pki_scanner, cbom, report, sarif, mosca, diff)
+from . import (tls_scanner, tls13_probe, ssh_scanner, ike_scanner,
+               code_scanner, pki_scanner, cbom, report, sarif, mosca, diff)
 
 __all__ = [
     "Finding", "classify", "summarize", "AssetType",
     "QuantumRisk", "Severity", "Primitive", "lookup",
-    "tls_scanner", "tls13_probe", "ssh_scanner", "code_scanner", "pki_scanner",
-    "cbom", "report", "sarif", "mosca", "diff",
+    "tls_scanner", "tls13_probe", "ssh_scanner", "ike_scanner", "code_scanner",
+    "pki_scanner", "cbom", "report", "sarif", "mosca", "diff",
     "__version__",
 ]
