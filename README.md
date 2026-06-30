@@ -40,6 +40,10 @@ remediation by HNDL exposure.
   the server's **entire** offered key-exchange / host-key / cipher / MAC set,
   including PQ hybrids (`sntrup761x25519`, `mlkem768x25519`). SSH key exchange is
   a major HNDL surface, and KEXINIT is pre-authentication.
+- **IPsec / IKEv2 endpoint scanning** — sends an authorized `IKE_SA_INIT`
+  (RFC 7296) over UDP and classifies the responder's negotiated encryption /
+  PRF / integrity / **Diffie-Hellman group**, detecting weak MODP groups, the
+  HNDL key-exchange, and PQ ML-KEM groups.
 - **PKI / certificate-file discovery** — parses X.509 / PKCS#7 / key files
   (`.pem`/`.crt`/`.cer`/`.der`/`.p7b`/`.key`/…) in a tree and classifies each
   key + signature algorithm (real crypto artifacts, not pattern guesses).
@@ -103,6 +107,9 @@ gs tls example.com:443 api.example.com:443 --cbom cbom.json --report report.md
 # SSH endpoint(s) — enumerate the full offered KEX/host-key/cipher/MAC set
 gs ssh example.com github.com:22 --report report.md
 
+# IPsec/IKEv2 gateway(s) — classify the negotiated transforms + DH group
+gs ike vpn.example.com --report report.md
+
 # Source / dependency / certificate tree
 gs code ./my-repo --report report.md --json findings.json
 
@@ -143,18 +150,20 @@ diffable across scans and operating systems.
 ## Scope & limitations
 
 Stated plainly, because the no-fabrication standard cuts both ways. Current as of
-v0.2.2, split into gaps we intend to close and properties that are deliberate.
+v0.2.3. The active network/file surfaces are TLS, SSH, IPsec/IKEv2, and
+source/dep/PKI files. What remains is deliberate.
 
-**Roadmap gaps (open, will be addressed):**
+**Out of scope (need fundamentally different tooling, not faked):**
 
-- **IPsec/IKEv2 discovery** — a UDP IKE SA-proposal probe is feasible but not yet
-  built.
-- **HSM, firmware, and traffic-capture surfaces** — genuinely need different
-  tooling (PKCS#11 / binary RE / pcap), so they are out of scope for this
-  in-process probe-and-file tool rather than faked.
+- **HSM, firmware, and traffic-capture surfaces** — require PKCS#11 / binary
+  reverse-engineering / pcap analysis respectively, which is a different class of
+  tool than this in-process probe-and-file scanner.
 
 **By design (intentional, not defects):**
 
+- **Network probes report the *negotiated* set where the protocol only reveals
+  that** (the IKEv2 responder echoes one chosen proposal; TLS/SSH enumerate the
+  full set).
 - **Source scan is pattern-based** — it favors recall over precision, so treat
   source findings as leads to confirm, not proof of exploitable config. (A
   semantic/AST pass could raise precision but is a different tool.)
@@ -164,10 +173,12 @@ v0.2.2, split into gaps we intend to close and properties that are deliberate.
 
 ## Roadmap
 
+All planned surfaces are implemented:
+
 1. ~~TLS 1.3 `supported_groups` probe~~ ✓ · ~~full cipher-suite enumeration~~ ✓.
-2. ~~SSH~~ ✓ · ~~S/MIME (cert/key files)~~ ✓ · IPsec/IKEv2 surface (next).
+2. ~~SSH~~ ✓ · ~~S/MIME (cert/key files)~~ ✓ · ~~IPsec/IKEv2~~ ✓.
 3. ~~Continuous re-scan + posture diffing~~ ✓ (`gs diff`).
-4. ~~Hybrid-readiness checks (X25519MLKEM768, sntrup761x25519)~~ ✓.
+4. ~~Hybrid-readiness checks (X25519MLKEM768, sntrup761x25519, ML-KEM IKE)~~ ✓.
 
 ## Layout
 
@@ -178,6 +189,7 @@ cryptoscan/
   tls_scanner.py  TLS / cert discovery + cipher-suite enumeration
   tls13_probe.py  live TLS 1.3 group + PQC-hybrid + cipher-suite probe
   ssh_scanner.py  SSH KEXINIT algorithm-set enumeration
+  ike_scanner.py  IPsec/IKEv2 IKE_SA_INIT transform discovery
   code_scanner.py source + 7-ecosystem dependency discovery
   pki_scanner.py  X.509 / PKCS#7 / key-file discovery
   mosca.py        Mosca X+Y>Z risk engine

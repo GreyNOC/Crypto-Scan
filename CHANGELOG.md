@@ -3,6 +3,28 @@
 All notable changes to GreyNOC CryptoScan are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.3] — IPsec/IKEv2 surface (roadmap complete)
+
+The last planned discovery surface. All roadmap items are now implemented.
+
+### Added
+- **IPsec / IKEv2 endpoint scanning** (`gs ike`, `ike_scanner.py`). Sends an
+  authorized `IKE_SA_INIT` (RFC 7296) over UDP and parses the responder's chosen
+  SA — or its `INVALID_KE_PAYLOAD` preferred group — to classify the negotiated
+  encryption / PRF / integrity and, critically, the **Diffie-Hellman group**
+  (the HNDL key-exchange signal). Weak MODP-768/1024 and ECP-192 groups escalate
+  to classically-weak; the PQ ML-KEM groups (codepoints 35/36/37,
+  draft-ietf-ipsecme-ikev2-mlkem) are detected as PQ-safe. New `ike-endpoint`
+  asset type + `--ike` on the combined `scan`. Verified live against a strongSwan
+  gateway.
+- New primitives: `AES-XCBC` (IKE/IPsec AES MAC) and `NULL-ENCRYPTION`
+  (ENCR_NULL — plaintext IPsec is itself a HIGH finding).
+
+### Notes
+- All transform IDs and the IKEv2 wire layout were fact-verified before
+  implementation; the binary response parser is fuzzed (20k random + adversarial
+  inputs) to never hang or raise.
+
 ## [0.2.2] — cipher enumeration + SSH & PKI surfaces
 
 Closes the single-handshake cipher limitation and expands coverage beyond
