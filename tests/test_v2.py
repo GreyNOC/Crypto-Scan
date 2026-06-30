@@ -962,8 +962,8 @@ def _ike_response(transforms, *, flags=0x20):
     prop = struct.pack(">BBHBBBB", 0, 0, 8 + len(trs), 1, 1, 0,
                        len(transforms)) + trs
     sa = struct.pack(">BBH", 0, 0, 4 + len(prop)) + prop
-    hdr = struct.pack(">8s8sBBBBII", b"A" * 8, b"B" * 8, 33, 0x20, 34, flags,
-                      0, 28 + len(sa))
+    hdr = struct.pack(">8s8sBBBBII", _ike._INIT_SPI, b"B" * 8, 33, 0x20, 34,
+                      flags, 0, 28 + len(sa))
     return hdr + sa
 
 
@@ -1019,10 +1019,34 @@ def test_ike_invalid_ke_payload_yields_preferred_group():
     nd = struct.pack(">H", 19)
     notify = struct.pack(">BBH", 0, 0, 17) + nd
     body = struct.pack(">BBH", 0, 0, 4 + len(notify)) + notify
-    hdr = struct.pack(">8s8sBBBBII", b"A" * 8, b"B" * 8, 41, 0x20, 34, 0x20,
-                      0, 28 + len(body))
+    hdr = struct.pack(">8s8sBBBBII", _ike._INIT_SPI, b"B" * 8, 41, 0x20, 34,
+                      0x20, 0, 28 + len(body))
     o = _ike.parse_response(hdr + body)
     assert o.notify == 17 and o.preferred_group == 19
+
+
+def test_ike_rejects_non_response_and_unknown_cipher():
+    # Rank 2: a request (INITIATOR flag, not RESPONSE) must be rejected.
+    req = _ike.build_ike_sa_init()
+    assert _ike.parse_response(req) is None
+    # A response that doesn't echo our initiator SPI is rejected.
+    bad_spi = _ike_response([(4, 31, None)])
+    bad_spi = b"\x00" * 8 + bad_spi[8:]
+    assert _ike.parse_response(bad_spi) is None
+    # Rank 1: an unrecognized cipher (Camellia-CBC tid 23) must NOT become AES.
+    resp = _ike_response([(1, 23, 256), (4, 31, None)])
+    o = _ike.parse_response(resp)
+    assert o.encryption == (None, 256)              # not mislabeled "AES"
+    o.host, o.port = "h", 500
+    import cryptoscan.ike_scanner as m
+    saved = m.probe
+    m.probe = lambda *a, **k: o
+    try:
+        names = {f.fact.name for f in _ike.scan("h", 500)}
+    finally:
+        m.probe = saved
+    assert not any("AES" in n for n in names)       # no fabricated AES finding
+    assert "X25519" in names                        # the real Curve25519 KEX is kept
 
 
 def test_ike_parse_never_raises_on_garbage():

@@ -35,6 +35,10 @@ _PL_SA, _PL_KE, _PL_NONCE, _PL_NOTIFY = 33, 34, 40, 41
 _TT_ENCR, _TT_PRF, _TT_INTEG, _TT_DH = 1, 2, 3, 4
 _ATTR_KEY_LENGTH = 0x800E  # AF=1 | type 14
 _N_NO_PROPOSAL_CHOSEN, _N_INVALID_KE_PAYLOAD = 14, 17
+# Fixed initiator SPI so a response can be matched to our probe — a reflected or
+# unrelated packet (wrong echoed SPI, or the INITIATOR flag) is dropped, not
+# parsed as the target's negotiated crypto.
+_INIT_SPI = b"GNCS\x00\x00\x00\x01"
 
 # Transform Type 4: Diffie-Hellman group / key-exchange method -> (token, param).
 DH_GROUPS: dict[int, tuple[str, str | None]] = {
@@ -68,7 +72,7 @@ _ENCR: dict[int, str] = {
 }
 # Transform Type 2 (PRF) / Type 3 (INTEG): id -> token (the security-relevant part).
 _PRF: dict[int, str] = {1: "MD5", 2: "SHA-1", 4: "AES-XCBC", 5: "HMAC",
-                        6: "HMAC", 7: "HMAC", 8: "AES-XCBC"}
+                        6: "HMAC", 7: "HMAC", 8: "AES-CMAC"}
 _INTEG: dict[int, str] = {1: "MD5", 2: "SHA-1", 5: "AES-XCBC",
                           12: "HMAC", 13: "HMAC", 14: "HMAC"}
 
@@ -134,7 +138,7 @@ def build_ike_sa_init(ke_group: int = 14) -> bytes:
     ke = _payload(_PL_NONCE, struct.pack(">HH", ke_group, 0) + ke_data)
     nonce = _payload(0, os.urandom(32))
     body = sa + ke + nonce
-    header = struct.pack(">8s8sBBBBII", os.urandom(8), b"\x00" * 8, _PL_SA,
+    header = struct.pack(">8s8sBBBBII", _INIT_SPI, b"\x00" * 8, _PL_SA,
                          _VERSION, _EXCH_IKE_SA_INIT, _FLAG_INITIATOR, 0,
                          28 + len(body))
     return header + body
@@ -172,9 +176,13 @@ def parse_response(data: bytes) -> IKEObservation | None:
     """Parse an IKE_SA_INIT response (or Notify) into an observation."""
     if len(data) < 28:
         return None
-    (_ispi, _rspi, next_p, ver, exch, flags, _mid, _len) = \
+    (ispi, _rspi, next_p, ver, exch, flags, _mid, _len) = \
         struct.unpack_from(">8s8sBBBBII", data, 0)
     if exch != _EXCH_IKE_SA_INIT:
+        return None
+    # Must be a RESPONSE that echoes our initiator SPI — otherwise it's a
+    # reflection of our own probe or an unrelated/crafted packet.
+    if not (flags & _FLAG_RESPONSE) or ispi != _INIT_SPI:
         return None
     obs = IKEObservation(host="", port=0,
                          is_response=bool(flags & _FLAG_RESPONSE))
@@ -187,7 +195,9 @@ def parse_response(data: bytes) -> IKEObservation | None:
         if cur == _PL_SA:
             for ttype, tid, keybits in _parse_sa(body):
                 if ttype == _TT_ENCR:
-                    obs.encryption = (_ENCR.get(tid, "AES"), keybits)
+                    # No "AES" default — an unrecognized cipher (Camellia, SM4, …)
+                    # must NOT be mislabeled AES. None -> skipped in scan().
+                    obs.encryption = (_ENCR.get(tid), keybits)
                 elif ttype == _TT_PRF:
                     obs.prf = _PRF.get(tid)
                 elif ttype == _TT_INTEG:
@@ -258,8 +268,10 @@ def scan(host: str, port: int = 500, timeout: float = 5.0) -> list[Finding]:
     group = obs.dh_group or obs.preferred_group
     if group is not None and group in DH_GROUPS:
         token, param = DH_GROUPS[group]
-        emit(token, "ike-kex", key_est=True, parameter=param,
-             evidence=DH_GROUP_NAMES.get(group, str(group)))
+        ev = DH_GROUP_NAMES.get(group, str(group))
+        if group in (35, 36, 37):  # be explicit the IKEv2 ML-KEM binding is draft
+            ev += f" (IKEv2 draft group {group})"
+        emit(token, "ike-kex", key_est=True, parameter=param, evidence=ev)
     if obs.encryption is not None:
         tok, keybits = obs.encryption
         if tok == "AES":
