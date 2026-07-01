@@ -11,8 +11,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from ._version import __version__
-from .classifier import Finding, summarize
-from .primitives import QuantumRisk, Severity
+from .classifier import Finding, AssetType, summarize
+from .primitives import Primitive, QuantumRisk, Severity
 
 _SEV_ORDER = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM,
               Severity.LOW, Severity.INFO]
@@ -56,6 +56,8 @@ def render(findings: list[Finding], target: str,
                  f"CRITICAL: {sev['CRITICAL']} · HIGH: {sev['HIGH']} · "
                  f"MEDIUM: {sev['MEDIUM']} · LOW: {sev['LOW']} · INFO: {sev['INFO']}")
     lines.append("")
+
+    lines.extend(_pq_readiness_section(findings))
 
     if mosca:
         lines.extend(_mosca_section(mosca))
@@ -118,6 +120,55 @@ def render(findings: list[Finding], target: str,
                  "locator. Crypto-agility is the durable control — design "
                  "replacements behind an abstraction so the next migration is cheap.")
     return "\n".join(lines)
+
+
+def pq_hybrid_status(findings: list[Finding]) -> tuple[set, dict, set]:
+    """Reduce endpoint key-exchange findings to PQ-hybrid readiness.
+
+    Returns (endpoints-with-a-KEX, {locator: observed-hybrid-name},
+    TLS-locators-offering-a-hybrid-but-negotiating-classical). 'negotiated' is
+    kept distinct from 'offered': a TLS server can advertise a hybrid yet still
+    negotiate a classical group.
+    """
+    kex_endpoints: set = set()
+    observed: dict = {}
+    offered_only: set = set()
+    for f in findings:
+        ex = f.extra or {}
+        if ex.get("role") == "kex-group":                 # TLS negotiated group
+            kex_endpoints.add(f.locator)
+            if ex.get("pqc_hybrid"):
+                observed[f.locator] = f.fact.name
+            elif ex.get("supports_pqc_hybrid"):
+                offered_only.add(f.locator)
+        elif (f.asset_type in (AssetType.SSH_ENDPOINT, AssetType.IKE_ENDPOINT)
+              and f.fact.primitive is Primitive.KEY_AGREE):
+            kex_endpoints.add(f.locator)
+            if f.fact.risk is QuantumRisk.SAFE:
+                observed[f.locator] = f.fact.name
+    return kex_endpoints, observed, offered_only
+
+
+def _pq_readiness_section(findings: list[Finding]) -> list[str]:
+    kex_endpoints, observed, offered_only = pq_hybrid_status(findings)
+    if not kex_endpoints:
+        return []
+    lines = [
+        "## Post-quantum readiness (key exchange)",
+        "",
+        f"Endpoints with a key exchange observed: **{len(kex_endpoints)}** · "
+        f"PQ-hybrid observed: **{len(observed)}**"
+        + (f" · offering a hybrid but negotiating classical: "
+           f"**{len(offered_only)}**" if offered_only else ""),
+        "",
+    ]
+    for loc, name in sorted(observed.items()):
+        lines.append(f"- `{loc}` — PQ-hybrid observed: **{name}**")
+    for loc in sorted(offered_only):
+        lines.append(f"- `{loc}` — offers a PQ hybrid but negotiated a "
+                     "classical group (still harvest-now-decrypt-later exposed)")
+    lines.append("")
+    return lines
 
 
 def _mosca_section(m: dict) -> list[str]:

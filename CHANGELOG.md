@@ -3,6 +3,29 @@
 All notable changes to GreyNOC CryptoScan are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.4] — post-scan analysis pass (perf, UX, guards)
+
+Polish from a full analyze-and-improve pass over the mature codebase. No new
+surfaces; sharper output and fewer round-trips.
+
+### Added
+- **Post-quantum readiness section** in the Markdown report + a console line —
+  surfaces which endpoints have a PQ-hybrid key exchange *observed* vs merely
+  *offered* (a server can advertise a hybrid yet negotiate a classical group).
+  This CNSA-2.0 headline was collected but previously discarded.
+- **`gs assess <host>`** — scan one host across TLS + SSH + IKEv2 in one command.
+- **`--json` envelope is versioned** (`schema_version` / `scanner_version`), like
+  the CBOM/SARIF outputs; still timestamp-free so identical scans stay
+  byte-identical.
+
+### Changed / Fixed
+- **Network targets are probed once, not twice.** `tls/ssh/ike` `scan()` accept a
+  pre-fetched observation, so the CLI no longer re-probes each host after its
+  status line — halving handshakes/latency per host.
+- **`ecdsa-with-sha1` / `dsa-with-sha1` cert signatures** now surface the SHA-1
+  LEGACY finding (previously a SHA-1-signed ECDSA cert dropped that signal).
+- Corrected the stale CLI module docstring (all subcommands documented).
+
 ## [0.2.3] — IPsec/IKEv2 surface (roadmap complete)
 
 The last planned discovery surface. All roadmap items are now implemented.

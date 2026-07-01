@@ -200,9 +200,12 @@ def _try_set_ciphers(ctx: ssl.SSLContext, cipher_str: str) -> bool:
         return False
 
 
-def scan(host: str, port: int = 443, timeout: float = 8.0) -> list[Finding]:
-    """Probe a TLS endpoint and emit classified Findings."""
-    obs = probe(host, port, timeout)
+def scan(host: str, port: int = 443, timeout: float = 8.0, *,
+         obs: "TLSObservation | None" = None) -> list[Finding]:
+    """Probe a TLS endpoint and emit classified Findings. Pass a pre-fetched
+    ``obs`` to avoid re-probing (the CLI already probes for its status line)."""
+    if obs is None:
+        obs = probe(host, port, timeout)
     findings: list[Finding] = []
     locator = f"{host}:{port}"
     if obs.error:

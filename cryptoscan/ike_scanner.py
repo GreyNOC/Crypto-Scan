@@ -245,9 +245,12 @@ def _aes_token(keybits: int | None) -> str:
                                                                 "AES-128")
 
 
-def scan(host: str, port: int = 500, timeout: float = 5.0) -> list[Finding]:
-    """Probe an IKEv2 endpoint and emit classified Findings."""
-    obs = probe(host, port, timeout)
+def scan(host: str, port: int = 500, timeout: float = 5.0, *,
+         obs: "IKEObservation | None" = None) -> list[Finding]:
+    """Probe an IKEv2 endpoint and emit classified Findings. Pass a pre-fetched
+    ``obs`` to avoid re-probing."""
+    if obs is None:
+        obs = probe(host, port, timeout)
     findings: list[Finding] = []
     if obs.error and obs.dh_group is None and obs.preferred_group is None:
         return findings

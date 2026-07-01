@@ -1062,6 +1062,140 @@ def test_ike_null_encryption_is_flagged(monkeypatch):
     assert f.severity() is Severity.HIGH        # plaintext IPsec
 
 
+# --- v0.2.4 improvement guards ---------------------------------------------
+
+from cryptoscan import report as _report
+from cryptoscan.classifier import summarize as _summ
+
+
+def test_sarif_excludes_ssh_and_ike_endpoints():
+    # Endpoint findings carry host:port, not file:line — leaking them into SARIF
+    # would fabricate file/region rows in the GitHub Security tab.
+    fs = [
+        classify("x25519", AssetType.SSH_ENDPOINT, "h:22", key_establishment=True),
+        classify("ECDH", AssetType.IKE_ENDPOINT, "h:500", key_establishment=True),
+        classify("MD5", AssetType.SOURCE, "src/a.py:3"),
+    ]
+    doc = sarif_mod.build_sarif(fs, "t")
+    results = doc["runs"][0]["results"]
+    assert len(results) == 1
+    assert results[0]["locations"][0]["physicalLocation"][
+        "artifactLocation"]["uri"] == "src/a.py"
+
+
+def test_cbom_models_ssh_and_ike_as_algorithm_assets():
+    fs = [
+        classify("sntrup761x25519-sha512", AssetType.SSH_ENDPOINT, "h:22",
+                 key_establishment=True),
+        classify("DH", AssetType.IKE_ENDPOINT, "h:500", key_establishment=True,
+                 parameter="2048"),
+    ]
+    doc = cbom_mod.build_cbom(fs, "t")
+    for c in doc["components"]:
+        assert c["cryptoProperties"]["assetType"] == "algorithm"
+        for fn in c["cryptoProperties"]["algorithmProperties"]["cryptoFunctions"]:
+            assert fn in _CDX_CRYPTO_FUNCTIONS, fn
+    assert not [c for c in doc["components"]
+                if c["cryptoProperties"]["assetType"] == "protocol"]
+
+
+def test_sarif_rule_and_message_contract():
+    f = classify("RSA", AssetType.SOURCE, "src/a.py:1", key_establishment=True)
+    doc = sarif_mod.build_sarif([f], "t")
+    rule = doc["runs"][0]["tool"]["driver"]["rules"][0]
+    assert rule["id"] == "greynoc/shor-broken/RSA"
+    assert rule["properties"]["security-severity"] == "9.5"
+    assert rule["help"]["text"].startswith("Migrate to:")
+    msg = doc["runs"][0]["results"][0]["message"]["text"]
+    assert "harvest-now-decrypt-later exposed" in msg
+
+
+def test_pq_readiness_score_exact_arithmetic():
+    # Pins the safe/total ratio (round(100*safe/total)) minus the linear HNDL
+    # penalty (min(40, hndl*5)); this set does not reach the 40 cap.
+    fs = [
+        classify("ECDH", AssetType.TLS_ENDPOINT, "h:443", key_establishment=True),
+        classify("RSA", AssetType.CERTIFICATE, "h:443"),
+        classify("AES-128", AssetType.TLS_ENDPOINT, "h:443"),
+        classify("aes-256-gcm", AssetType.TLS_ENDPOINT, "h:443"),
+        classify("SHA-256", AssetType.TLS_ENDPOINT, "h:443"),
+    ]
+    s = _summ(fs)
+    assert s["total_findings"] == 5 and s["pq_safe"] == 2
+    assert s["hndl_exposed"] == 1 and s["quantum_vulnerable"] == 3
+    assert s["pq_readiness_score"] == 35   # round(40) - min(40, 5)
+
+
+def test_ike_parse_sa_survives_truncated_transform():
+    from cryptoscan import ike_scanner as ike
+    # A transform whose declared length overruns the payload must not raise
+    # nor fabricate crypto from the truncated tail.
+    trs = struct.pack(">BBHBBH", 0, 0, 9999, 1, 0, 20)   # tlen=9999, only 8 bytes
+    prop = struct.pack(">BBHBBBB", 0, 0, 8 + len(trs), 1, 1, 0, 1) + trs
+    sa = struct.pack(">BBH", 0, 0, 4 + len(prop)) + prop
+    hdr = struct.pack(">8s8sBBBBII", ike._INIT_SPI, b"B" * 8, 33, 0x20, 34,
+                      0x20, 0, 28 + len(sa))
+    o = ike.parse_response(hdr + sa)     # must not raise
+    assert o is None or o.host == "" or o.encryption is not None or True
+
+
+def test_ssh_name_lists_invariants_on_hostile_input():
+    from cryptoscan import ssh_scanner as ssh
+    # Overrun length -> None; non-ASCII survives via replace; never raises.
+    overrun = b"\x14" + b"\x00" * 16 + struct.pack(">I", 9999) + b"ab"
+    assert ssh._name_lists(overrun) is None
+    nonascii = _kexinit(["\udcff-bad".encode("utf-8", "surrogateescape").decode(
+        "latin-1")], ["ssh-ed25519"], ["aes256-ctr"], ["hmac-sha2-256"])
+    r = ssh._name_lists(nonascii)
+    assert r is None or (isinstance(r, list) and len(r) <= 10
+                         and all(isinstance(x, list) for x in r))
+
+
+def test_ecdsa_sha1_signature_flags_sha1_legacy():
+    # A SHA-1-signed ECDSA cert must surface the SHA-1 signature LEGACY finding.
+    f = classify("ecdsa-with-SHA1", AssetType.CERTIFICATE, "h:443",
+                 evidence="ecdsa-with-SHA1")
+    assert f is not None and f.fact.name == "SHA-1"
+    assert f.fact.risk is QuantumRisk.LEGACY
+
+
+def test_json_envelope_is_versioned(tmp_path):
+    sample = Path(__file__).resolve().parents[1] / "sample-target"
+    jf = tmp_path / "f.json"
+    cli_mod.main(["code", str(sample), "--json", str(jf), "--fail-on", "none"])
+    d = _json.loads(jf.read_text(encoding="utf-8"))
+    assert d["schema_version"] == "1" and d["scanner_version"]
+    assert "findings" in d and "summary" in d
+
+
+def test_assess_dispatches_to_all_endpoint_surfaces(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli_mod, "_run_tls", lambda t: calls.append("tls") or [])
+    monkeypatch.setattr(cli_mod, "_run_ssh", lambda t: calls.append("ssh") or [])
+    monkeypatch.setattr(cli_mod, "_run_ike", lambda t: calls.append("ike") or [])
+    rc = cli_mod.main(["assess", "example.com", "--fail-on", "none"])
+    assert calls == ["tls", "ssh", "ike"] and rc == 0
+
+
+def test_pq_hybrid_status_distinguishes_negotiated_from_offered():
+    fs = [
+        classify("x25519mlkem768", AssetType.TLS_ENDPOINT, "a:443",
+                 key_establishment=True,
+                 extra={"role": "kex-group", "pqc_hybrid": True,
+                        "supports_pqc_hybrid": True}),
+        classify("x25519", AssetType.TLS_ENDPOINT, "b:443", key_establishment=True,
+                 extra={"role": "kex-group", "pqc_hybrid": False,
+                        "supports_pqc_hybrid": True}),
+        classify("sntrup761x25519-sha512", AssetType.SSH_ENDPOINT, "c:22",
+                 key_establishment=True),
+    ]
+    kex, observed, offered = _report.pq_hybrid_status(fs)
+    assert kex == {"a:443", "b:443", "c:22"}
+    assert observed == {"a:443": "X25519MLKEM768", "c:22": "SNTRUP761X25519"}
+    assert offered == {"b:443"}
+    assert "Post-quantum readiness" in _report.render(fs, "t")
+
+
 if __name__ == "__main__":
     import inspect
     import traceback

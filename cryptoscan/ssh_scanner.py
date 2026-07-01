@@ -231,10 +231,12 @@ def _dh_parameter(algo: str) -> str | None:
     return None
 
 
-def scan(host: str, port: int = 22, timeout: float = 8.0) -> list[Finding]:
+def scan(host: str, port: int = 22, timeout: float = 8.0, *,
+         obs: "SSHObservation | None" = None) -> list[Finding]:
     """Probe an SSH endpoint and emit classified Findings for its full offered
-    algorithm set."""
-    obs = probe(host, port, timeout)
+    algorithm set. Pass a pre-fetched ``obs`` to avoid re-probing."""
+    if obs is None:
+        obs = probe(host, port, timeout)
     findings: list[Finding] = []
     if obs.error and not obs.kex_algorithms:
         return findings

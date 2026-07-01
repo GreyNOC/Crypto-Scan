@@ -1,12 +1,18 @@
 """
-GreyNOC CryptoScan — command-line interface.
+GreyNOC CryptoScan — command-line interface (also installed as `gs` / `gscan`).
 
-  cryptoscan tls   <host[:port]> [host2 ...] [--cbom out.json] [--report out.md]
-  cryptoscan code  <path>                    [--cbom out.json] [--report out.md]
-  cryptoscan scan  <path> --tls host[:port]  [--cbom out.json] [--report out.md]
+Subcommands (see `--help` on each for flags):
+  tls     <host ...>            scan TLS endpoint(s)
+  ssh     <host ...>            scan SSH endpoint(s) via KEXINIT
+  ike     <host ...>            scan IPsec/IKEv2 endpoint(s)
+  assess  <host ...>            one host across TLS + SSH + IKEv2
+  code    <path>               scan a source / dependency / cert-file tree
+  scan    <path> [--tls/--ssh/--ike ...]   combined code + endpoints
+  diff    <old.json> <new.json>            posture diff (did the migration land?)
 
-Exit code is 2 when findings at or above the --fail-on severity are present
-(default: critical), so it can gate CI; pass --fail-on none to never fail.
+Common outputs: --cbom / --report / --json / --sarif; Mosca risk via --mosca.
+Exit code is 2 when findings at or above --fail-on (default: critical) are
+present, so it can gate CI; pass --fail-on none to never fail.
 """
 
 from __future__ import annotations
@@ -147,7 +153,7 @@ def _run_tls(targets: list[str]) -> list[Finding]:
         print(f"    {obs.protocol} / {obs.cipher_name} / "
               f"key={obs.key_algo}-{obs.key_size or '?'} "
               f"sig={obs.cert_sig_algo}", file=sys.stderr)
-        findings.extend(tls_scanner.scan(host, port))
+        findings.extend(tls_scanner.scan(host, port, obs=obs))
     return findings
 
 
@@ -167,7 +173,7 @@ def _run_ssh(targets: list[str]) -> list[Finding]:
         print(f"    {obs.banner} / kex={len(obs.kex_algorithms)} "
               f"hostkey={len(obs.host_key_algorithms)} "
               f"enc={len(obs.encryption_algorithms)}", file=sys.stderr)
-        findings.extend(ssh_scanner.scan(host, port))
+        findings.extend(ssh_scanner.scan(host, port, obs=obs))
     return findings
 
 
@@ -186,7 +192,7 @@ def _run_ike(targets: list[str]) -> list[Finding]:
             continue
         print(f"    response={obs.is_response} dh_group={obs.dh_group} "
               f"enc={obs.encryption}", file=sys.stderr)
-        findings.extend(ike_scanner.scan(host, port))
+        findings.extend(ike_scanner.scan(host, port, obs=obs))
     return findings
 
 
@@ -218,7 +224,10 @@ def _emit(findings: list[Finding], target: str, args) -> int:
         _write_text(args.report, md)
         print(f"[+] Report written: {args.report}", file=sys.stderr)
     if args.json:
-        out = {"target": target, "summary": s,
+        # Versioned like the CBOM/SARIF envelopes; no timestamp so identical
+        # scans stay byte-identical (checksummable, golden-file friendly).
+        out = {"schema_version": "1", "scanner_version": __version__,
+               "target": target, "summary": s,
                "findings": [f.to_dict() for f in findings]}
         if mosca_doc:
             out["mosca"] = mosca_doc
@@ -239,6 +248,11 @@ def _emit(findings: list[Finding], target: str, args) -> int:
     sev = s["by_severity"]
     print(f"CRITICAL {sev['CRITICAL']} · HIGH {sev['HIGH']} · "
           f"MEDIUM {sev['MEDIUM']} · LOW {sev['LOW']} · INFO {sev['INFO']}")
+    kex_eps, pq_observed, pq_offered = report_mod.pq_hybrid_status(findings)
+    if kex_eps:
+        extra = f" · offering-only {len(pq_offered)}" if pq_offered else ""
+        print(f"PQ key-exchange: {len(pq_observed)}/{len(kex_eps)} endpoint(s) "
+              f"with a PQ hybrid observed{extra}")
     if mosca_doc:
         p = mosca_doc["posture"]
         print(f"Mosca [{mosca_doc['scenario']}]: {p['worst_urgency']} · "
@@ -299,6 +313,11 @@ def main(argv: list[str] | None = None) -> int:
     sp_ike.add_argument("targets", nargs="+", metavar="HOST[:PORT]")
     _add_outputs(sp_ike)
 
+    sp_assess = sub.add_parser(
+        "assess", help="scan a host across TLS + SSH + IKEv2 (default ports)")
+    sp_assess.add_argument("targets", nargs="+", metavar="HOST")
+    _add_outputs(sp_assess)
+
     sp_code = sub.add_parser("code", help="scan a source/dependency tree")
     sp_code.add_argument("path")
     _add_outputs(sp_code)
@@ -334,6 +353,10 @@ def main(argv: list[str] | None = None) -> int:
         target = ", ".join(args.targets)
     elif args.cmd == "ike":
         findings = _run_ike(args.targets)
+        target = ", ".join(args.targets)
+    elif args.cmd == "assess":
+        findings = (_run_tls(args.targets) + _run_ssh(args.targets)
+                    + _run_ike(args.targets))
         target = ", ".join(args.targets)
     elif args.cmd == "code":
         findings = _run_code(args.path)

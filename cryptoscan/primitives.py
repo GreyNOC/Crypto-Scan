@@ -252,7 +252,8 @@ _reg(CryptoFact("MD5", Primitive.HASH, QuantumRisk.LEGACY, 0, 0,
 _reg(CryptoFact("SHA-1", Primitive.HASH, QuantumRisk.LEGACY, 0, 0,
                 migrate_to=("SHA-256", "SHA-384"),
                 note="SHAttered; disallowed by NIST after 2030 / already for sigs."),
-     "sha1", "sha-1", "sha1withrsaencryption")
+     "sha1", "sha-1", "sha1withrsaencryption",
+     "ecdsa-with-sha1", "ecdsawithsha1", "dsa-with-sha1", "dsawithsha1")
 
 _reg(CryptoFact("SHA-256", Primitive.HASH, QuantumRisk.SAFE, 256, 128,
                 note="Grover preimage -> ~128-bit; adequate."),
