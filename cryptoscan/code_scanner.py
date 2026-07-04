@@ -17,6 +17,7 @@ This is static and read-only. No code is executed.
 from __future__ import annotations
 
 import json
+import os
 import re
 import stat
 import xml.etree.ElementTree as ET
@@ -41,13 +42,17 @@ SOURCE_PATTERNS: list[tuple[re.Pattern, str, str]] = [
      "ECDSA", "Elliptic-curve (ECDSA) use"),
     (re.compile(r"\bECDH|key_agreement|exchange\s*\(\s*ec\.ECDH|crypto/ecdh", re.I),
      "ECDH", "Elliptic-curve Diffie-Hellman"),
-    (re.compile(r"\bEd25519|Ed448|ed25519\.|nacl\.sign", re.I),
-     "Ed25519", "Edwards-curve signature"),
+    (re.compile(r"\bEd25519|ed25519\.|nacl\.sign", re.I),
+     "Ed25519", "Edwards-curve signature (Ed25519)"),
+    (re.compile(r"\bEd448\b", re.I),
+     "Ed448", "Edwards-curve signature (Ed448)"),
     (re.compile(r"\bDiffieHellman|\bDH\.generate|crypto/dh\b|dhparam", re.I),
      "DH", "Finite-field Diffie-Hellman"),
     (re.compile(r"\bDSA\.generate|crypto/dsa\b|new DSA", re.I),
      "DSA", "DSA signature"),
-    (re.compile(r"\bAES\.new\([^)]*MODE_|aes-128|AES_128|createCipheriv\(\s*['\"]aes-128", re.I),
+    # `[^)]{0,120}` (bounded, not `*`) so a long line of 'AES.new(' with no ')'
+    # can't drive quadratic backtracking; a MODE_ constant is always near the call.
+    (re.compile(r"\bAES\.new\([^)]{0,120}MODE_|aes-128|AES_128|createCipheriv\(\s*['\"]aes-128", re.I),
      "AES-128", "AES-128 usage"),
     (re.compile(r"\baes-256|AES_256|createCipheriv\(\s*['\"]aes-256|AESGCM\b", re.I),
      "AES-256", "AES-256 usage"),
@@ -137,22 +142,52 @@ DEP_SIGNATURES: dict[str, str | None] = {
 }
 
 MAX_FILE_BYTES = 2_000_000  # skip files larger than 2 MB
+# Longest line we scan for crypto. Bounds work per line, but is generous enough
+# to reach crypto calls buried in minified/bundled single-line JS (a real recall
+# gap at the old 1 KB cap). Every SOURCE_PATTERNS wildcard is bounded (no
+# unbounded `.*`/`[^)]*` before a required literal), so worst-case work stays
+# linear in line length even at this cap.
+MAX_LINE_SCAN = 50_000
 
 
-def _rel_parts(path: Path, root: Path) -> tuple[str, ...]:
-    """Path parts relative to the scan root. SKIP_DIRS must be tested against
-    these, NOT path.parts — otherwise scanning a project that simply lives under
-    a directory named e.g. 'build' or 'vendor' would skip every file."""
-    rel = path.relative_to(root) if path.is_relative_to(root) else path
-    return rel.parts
+def _is_reparse(path: Path) -> bool:
+    """True for a symlink OR a Windows junction / mount point (reparse point).
+
+    os.walk(followlinks=False) already avoids descending into symlinked dirs, but
+    on Windows a *junction* (``mklink /J``) is a reparse point that is NOT a
+    symlink — ``Path.is_symlink()`` returns False for it, so os.walk would still
+    traverse it (escaping the root or looping). Detect the reparse attribute too.
+    Returns True on stat failure so a broken/odd entry is pruned, not descended."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return True
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    return bool(getattr(st, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def _iter_tree(root: Path):
+    """Yield files under root, traversal-safe.
+
+    os.walk(followlinks=False) plus reparse-point pruning of subdirectories, so a
+    directory symlink OR a Windows junction can neither escape the scan root nor
+    spin an unbounded loop. SKIP_DIRS is pruned by child name (relative to root,
+    never the absolute path — a project living under a dir named 'build'/'vendor'
+    must still be scanned). Symlinked *files* are followed (stat + S_ISREG
+    downstream keeps only regular targets), so symlink-based stores such as
+    /etc/ssl/certs still scan as they did before."""
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dp = Path(dirpath)
+        dirnames[:] = [d for d in dirnames
+                       if d not in SKIP_DIRS and not _is_reparse(dp / d)]
+        for fn in filenames:
+            yield dp / fn
 
 
 def _iter_source_files(root: Path):
-    for p in root.rglob("*"):
-        if p.is_dir():
-            continue
-        if any(part in SKIP_DIRS for part in _rel_parts(p, root)):
-            continue
+    for p in _iter_tree(root):
         if p.suffix.lower() in SOURCE_EXTS:
             try:
                 st = p.stat()
@@ -175,8 +210,8 @@ def scan_source(root: Path) -> list[Finding]:
         # on it.
         rel = (path.relative_to(root) if path.is_relative_to(root) else path).as_posix()
         for lineno, line in enumerate(text.splitlines(), 1):
-            if len(line) > 1000:
-                line = line[:1000]
+            if len(line) > MAX_LINE_SCAN:
+                line = line[:MAX_LINE_SCAN]
             for pattern, token, desc in SOURCE_PATTERNS:
                 if pattern.search(line):
                     f = classify(
@@ -351,10 +386,7 @@ MANIFESTS = {
 
 def scan_dependencies(root: Path) -> list[Finding]:
     findings: list[Finding] = []
-    for path in root.rglob("*"):
-        if path.is_dir() or any(part in SKIP_DIRS
-                                for part in _rel_parts(path, root)):
-            continue
+    for path in _iter_tree(root):
         parser = MANIFESTS.get(path.name.lower())
         if not parser:
             continue

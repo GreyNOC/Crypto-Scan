@@ -10,7 +10,7 @@ migration roadmap.
 
 > Authorized testing only · reproducible findings · no fabrication.
 
-GreyNOC · `GN-TOOL-CRYPTOSCAN-001` · v0.2.0
+GreyNOC · `GN-TOOL-CRYPTOSCAN-001` · v0.2.5
 
 ---
 
@@ -150,7 +150,7 @@ diffable across scans and operating systems.
 ## Scope & limitations
 
 Stated plainly, because the no-fabrication standard cuts both ways. Current as of
-v0.2.3. The active network/file surfaces are TLS, SSH, IPsec/IKEv2, and
+v0.2.5. The active network/file surfaces are TLS, SSH, IPsec/IKEv2, and
 source/dep/PKI files. What remains is deliberate.
 
 **Out of scope (need fundamentally different tooling, not faked):**

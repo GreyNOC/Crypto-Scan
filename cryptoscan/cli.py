@@ -11,8 +11,17 @@ Subcommands (see `--help` on each for flags):
   diff    <old.json> <new.json>            posture diff (did the migration land?)
 
 Common outputs: --cbom / --report / --json / --sarif; Mosca risk via --mosca.
-Exit code is 2 when findings at or above --fail-on (default: critical) are
-present, so it can gate CI; pass --fail-on none to never fail.
+
+Exit codes:
+  0  success / posture within the gate
+  1  diff could not load an input file
+  2  findings at or above --fail-on (default: critical), or a diff regression
+  3  scan could not complete — a code path that does not exist, or an endpoint
+     scan where no target was reachable (a "measured nothing" is NOT a clean
+     posture; distinct so CI never reads an all-errored scan as green)
+--fail-on none suppresses the findings gate AND the endpoint-incomplete exit 3;
+a nonexistent code/scan path still exits 3 (it is a usage error, not a posture).
+Note argparse also uses exit 2 for usage errors.
 """
 
 from __future__ import annotations
@@ -128,7 +137,30 @@ def _run_diff(args) -> int:
 
 
 def _parse_target(t: str, default_port: int = 443) -> tuple[str, int]:
-    if ":" in t and not t.startswith("["):
+    t = t.strip()
+    # Bracketed IPv6: '[host]' or '[host]:port' — parse the port after the ']'
+    # rather than treating the whole thing as an opaque host (which silently
+    # dropped an explicit port).
+    if t.startswith("["):
+        end = t.find("]")
+        if end == -1:
+            raise ValueError(f"bad target '{t}': unclosed '['")
+        host, rest = t[1:end], t[end + 1:]
+        if not rest:
+            return host, default_port
+        if not rest.startswith(":"):
+            # e.g. '[::1]8443' — a dropped ':' must not silently scan the default
+            # port; surface it rather than probe the wrong port.
+            raise ValueError(f"bad target '{t}': unexpected text after ']'")
+        try:
+            return host, int(rest[1:])
+        except ValueError:
+            raise ValueError(f"bad target '{t}': port must be numeric")
+    # Bare IPv6 (two or more colons, unbracketed): a literal host, default port —
+    # never split on a colon inside the address.
+    if t.count(":") >= 2:
+        return t, default_port
+    if ":" in t:
         host, _, port = t.rpartition(":")
         try:
             return host, int(port)
@@ -137,8 +169,12 @@ def _parse_target(t: str, default_port: int = 443) -> tuple[str, int]:
     return t, default_port
 
 
-def _run_tls(targets: list[str]) -> list[Finding]:
+def _run_tls(targets: list[str]) -> tuple[list[Finding], int]:
+    """Returns (findings, reached) — reached counts targets that answered, so a
+    scan is 'incomplete' only when nothing responded, not when a reachable host
+    simply yielded no findings."""
     findings: list[Finding] = []
+    reached = 0
     for t in targets:
         try:
             host, port = _parse_target(t)
@@ -150,15 +186,17 @@ def _run_tls(targets: list[str]) -> list[Finding]:
         if obs.error:
             print(f"    ! {obs.error}", file=sys.stderr)
             continue
+        reached += 1
         print(f"    {obs.protocol} / {obs.cipher_name} / "
               f"key={obs.key_algo}-{obs.key_size or '?'} "
               f"sig={obs.cert_sig_algo}", file=sys.stderr)
         findings.extend(tls_scanner.scan(host, port, obs=obs))
-    return findings
+    return findings, reached
 
 
-def _run_ssh(targets: list[str]) -> list[Finding]:
+def _run_ssh(targets: list[str]) -> tuple[list[Finding], int]:
     findings: list[Finding] = []
+    reached = 0
     for t in targets:
         try:
             host, port = _parse_target(t, default_port=22)
@@ -170,15 +208,17 @@ def _run_ssh(targets: list[str]) -> list[Finding]:
         if obs.error and not obs.kex_algorithms:
             print(f"    ! {obs.error}", file=sys.stderr)
             continue
+        reached += 1
         print(f"    {obs.banner} / kex={len(obs.kex_algorithms)} "
               f"hostkey={len(obs.host_key_algorithms)} "
               f"enc={len(obs.encryption_algorithms)}", file=sys.stderr)
         findings.extend(ssh_scanner.scan(host, port, obs=obs))
-    return findings
+    return findings, reached
 
 
-def _run_ike(targets: list[str]) -> list[Finding]:
+def _run_ike(targets: list[str]) -> tuple[list[Finding], int]:
     findings: list[Finding] = []
+    reached = 0
     for t in targets:
         try:
             host, port = _parse_target(t, default_port=500)
@@ -187,13 +227,17 @@ def _run_ike(targets: list[str]) -> list[Finding]:
             continue
         print(f"[*] IKEv2 IKE_SA_INIT probe: {host}:{port}", file=sys.stderr)
         obs = ike_scanner.probe(host, port)
-        if obs.error and obs.dh_group is None and obs.preferred_group is None:
+        # A responder that answered (even NO_PROPOSAL_CHOSEN / an unmapped
+        # transform) was reached, even if it produced no classified finding.
+        if obs.error and not obs.is_response and obs.dh_group is None \
+                and obs.preferred_group is None:
             print(f"    ! {obs.error}", file=sys.stderr)
             continue
+        reached += 1
         print(f"    response={obs.is_response} dh_group={obs.dh_group} "
               f"enc={obs.encryption}", file=sys.stderr)
         findings.extend(ike_scanner.scan(host, port, obs=obs))
-    return findings
+    return findings, reached
 
 
 def _run_code(path: str) -> list[Finding]:
@@ -208,7 +252,8 @@ def _run_code(path: str) -> list[Finding]:
     return findings + pki
 
 
-def _emit(findings: list[Finding], target: str, args) -> int:
+def _emit(findings: list[Finding], target: str, args,
+          incomplete: bool = False) -> int:
     s = summarize(findings)
     mosca_doc = None
     if getattr(args, "mosca", False):
@@ -226,8 +271,12 @@ def _emit(findings: list[Finding], target: str, args) -> int:
     if args.json:
         # Versioned like the CBOM/SARIF envelopes; no timestamp so identical
         # scans stay byte-identical (checksummable, golden-file friendly).
+        # scan_status flags an unmeasured run so a downstream diff/dashboard does
+        # not read its empty 0/100 summary as a clean posture.
         out = {"schema_version": "1", "scanner_version": __version__,
-               "target": target, "summary": s,
+               "target": target,
+               "scan_status": "incomplete" if incomplete else "complete",
+               "summary": s,
                "findings": [f.to_dict() for f in findings]}
         if mosca_doc:
             out["mosca"] = mosca_doc
@@ -241,10 +290,16 @@ def _emit(findings: list[Finding], target: str, args) -> int:
 
     # Console summary
     print(f"\n=== Posture: {target} ===")
-    print(f"PQ-readiness: {s['pq_readiness_score']}/100 | "
-          f"assets: {s['total_findings']} | "
-          f"HNDL-exposed: {s['hndl_exposed']} | "
-          f"vulnerable: {s['quantum_vulnerable']} | safe: {s['pq_safe']}")
+    if incomplete:
+        # A scan that reached nothing has an UNKNOWN posture, not a 100/100 one —
+        # never let an all-errored run read as clean.
+        print("PQ-readiness: n/a — scan incomplete (no target was reachable); "
+              "posture is unknown, not clean")
+    else:
+        print(f"PQ-readiness: {s['pq_readiness_score']}/100 | "
+              f"assets: {s['total_findings']} | "
+              f"HNDL-exposed: {s['hndl_exposed']} | "
+              f"vulnerable: {s['quantum_vulnerable']} | safe: {s['pq_safe']}")
     sev = s["by_severity"]
     print(f"CRITICAL {sev['CRITICAL']} · HIGH {sev['HIGH']} · "
           f"MEDIUM {sev['MEDIUM']} · LOW {sev['LOW']} · INFO {sev['INFO']}")
@@ -263,6 +318,11 @@ def _emit(findings: list[Finding], target: str, args) -> int:
     if code:
         print(f"[gate] failing: findings at or above "
               f"'{args.fail_on}' severity present", file=sys.stderr)
+    elif incomplete and args.fail_on != "none":
+        # Distinct from a findings gate: the scan could not measure the target.
+        print("[gate] failing: scan incomplete — no target reachable (exit 3)",
+              file=sys.stderr)
+        code = 3
     return code
 
 
@@ -345,31 +405,55 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "diff":
         return _run_diff(args)
 
+    # A code/scan path that does not exist is a scan that cannot run — reject it
+    # up front rather than silently "finding nothing" and exiting clean (a common
+    # CI footgun: a typo'd path reads as a passing posture).
+    if args.cmd in ("code", "scan") and not Path(args.path).exists():
+        print(f"[!] path does not exist: {args.path} (exit 3)", file=sys.stderr)
+        return 3
+
+    # 'incomplete' means the scan could not MEASURE its target(s) — every probe
+    # errored/timed out — not that it measured them and found nothing. A reachable
+    # endpoint that negotiates nothing (e.g. IKE NO_PROPOSAL_CHOSEN) is complete.
+    incomplete = False
     if args.cmd == "tls":
-        findings = _run_tls(args.targets)
+        findings, reached = _run_tls(args.targets)
         target = ", ".join(args.targets)
+        incomplete = bool(args.targets) and reached == 0
     elif args.cmd == "ssh":
-        findings = _run_ssh(args.targets)
+        findings, reached = _run_ssh(args.targets)
         target = ", ".join(args.targets)
+        incomplete = bool(args.targets) and reached == 0
     elif args.cmd == "ike":
-        findings = _run_ike(args.targets)
+        findings, reached = _run_ike(args.targets)
         target = ", ".join(args.targets)
+        incomplete = bool(args.targets) and reached == 0
     elif args.cmd == "assess":
-        findings = (_run_tls(args.targets) + _run_ssh(args.targets)
-                    + _run_ike(args.targets))
+        tf, tr = _run_tls(args.targets)
+        sf, sr = _run_ssh(args.targets)
+        kf, kr = _run_ike(args.targets)
+        findings = tf + sf + kf
         target = ", ".join(args.targets)
+        incomplete = bool(args.targets) and (tr + sr + kr) == 0
     elif args.cmd == "code":
         findings = _run_code(args.path)
         target = args.path
     else:  # scan
-        findings = (_run_code(args.path) + _run_tls(args.tls)
-                    + _run_ssh(args.ssh) + _run_ike(args.ike))
+        code_findings = _run_code(args.path)
+        tf, tr = _run_tls(args.tls)
+        sf, sr = _run_ssh(args.ssh)
+        kf, kr = _run_ike(args.ike)
+        findings = code_findings + tf + sf + kf
         extras = (([f", {', '.join(args.tls)}"] if args.tls else [])
                   + ([f", {', '.join(args.ssh)}"] if args.ssh else [])
                   + ([f", {', '.join(args.ike)}"] if args.ike else []))
         target = f"{args.path}" + "".join(extras)
+        # Endpoints were requested but none responded -> the endpoint half
+        # measured nothing (code findings, if any, are still reported).
+        endpoints_requested = len(args.tls) + len(args.ssh) + len(args.ike)
+        incomplete = endpoints_requested > 0 and (tr + sr + kr) == 0
 
-    return _emit(findings, target, args)
+    return _emit(findings, target, args, incomplete=incomplete)
 
 
 if __name__ == "__main__":

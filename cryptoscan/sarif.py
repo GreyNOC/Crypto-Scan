@@ -56,6 +56,10 @@ def _parse_locator(asset_type: AssetType, locator: str) -> dict | None:
     SOURCE locators are 'path:line' (line optional); DEPENDENCY locators are
     'manifest -> package' (no line). Returns None if no usable artifact path.
     """
+    # SARIF artifactLocation.uri must be a valid URI reference (forward slashes).
+    # Locators are POSIX-normalized upstream, but normalize here too so a stray
+    # Windows backslash path can never emit an invalid uri.
+    locator = locator.replace("\\", "/")
     if asset_type is AssetType.SOURCE:
         path, sep, tail = locator.rpartition(":")
         # SARIF region.startLine has a schema minimum of 1.
@@ -107,6 +111,7 @@ def _message(f: Finding) -> str:
 
 def build_sarif(findings: list[Finding], target: str) -> dict:
     rules: dict[str, dict] = {}
+    rule_index: dict[str, int] = {}
     results: list[dict] = []
     seen: set[str] = set()
 
@@ -121,9 +126,14 @@ def build_sarif(findings: list[Finding], target: str) -> dict:
             continue
         rid = _rule_id(f)
         if rid not in rules:
+            # Index matches the position in list(rules.values()) below, so the
+            # result's ruleIndex resolves its rule metadata (security-severity,
+            # help) directly — what GitHub code scanning prefers over id-only.
+            rule_index[rid] = len(rules)
             rules[rid] = _rule(f)
         results.append({
             "ruleId": rid,
+            "ruleIndex": rule_index[rid],
             "level": _severity_to_level(f.severity()),
             "message": {"text": _message(f)},
             "locations": [{"physicalLocation": loc}],

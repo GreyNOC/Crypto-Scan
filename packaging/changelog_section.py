@@ -15,16 +15,18 @@ from pathlib import Path
 def section(version: str, changelog: str) -> str | None:
     """Return the section body, or None if there is no matching heading.
 
-    Matches the bracketed form '## [<version>]' exactly, so '0.2.1' does not
-    accidentally match a '## [0.2.10]' heading.
+    Anchors on a heading of the form '## [<version>]' at the start of the line,
+    so '0.2.1' matches neither '## [0.2.10]' nor a mid-line mention like
+    '## Backported [0.2.1] fixes' — only the version's own section is captured.
     """
+    heading = re.compile(rf"^##\s+\[{re.escape(version)}\]")
     out: list[str] = []
     capturing = False
     for line in changelog.splitlines():
         if re.match(r"^## ", line):
             if capturing:
                 break
-            if f"[{version}]" in line:
+            if heading.match(line):
                 capturing = True
             continue
         if capturing:

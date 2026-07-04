@@ -53,7 +53,7 @@ SSH_ALGO_MAP: dict[str, tuple[str, str, bool]] = {
     # --- host key (RFC 8709/8332/5656) --------------------------------------
     "ssh-ed25519": ("EdDSA", "hostkey", False),
     "ssh-ed25519-cert-v01@openssh.com": ("EdDSA", "hostkey", False),
-    "ssh-ed448": ("EdDSA", "hostkey", False),
+    "ssh-ed448": ("Ed448", "hostkey", False),
     "rsa-sha2-256": ("RSA", "hostkey", False),
     "rsa-sha2-512": ("RSA", "hostkey", False),
     "rsa-sha2-256-cert-v01@openssh.com": ("RSA", "hostkey", False),

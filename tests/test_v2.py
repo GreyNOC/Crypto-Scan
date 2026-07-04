@@ -637,8 +637,8 @@ def test_cli_skips_bad_tls_target_without_crashing():
         assert False, "expected ValueError"
     except ValueError:
         pass
-    # The full code path must not raise.
-    assert _cli._run_tls(["example.com:https"]) == []
+    # The full code path must not raise; a bad target is skipped (0 reached).
+    assert _cli._run_tls(["example.com:https"]) == ([], 0)
 
 
 def test_parse_server_hello_rejects_truncated_extension():
@@ -799,8 +799,22 @@ def test_parse_target_variants():
     from cryptoscan.cli import _parse_target
     assert _parse_target("example.com") == ("example.com", 443)
     assert _parse_target("example.com:8443") == ("example.com", 8443)
-    # Bracketed IPv6 keeps the default port (documented limitation).
-    assert _parse_target("[::1]:443") == ("[::1]:443", 443)
+    # Bracketed IPv6: the explicit port after ']' is honored, not dropped.
+    assert _parse_target("[::1]:8443") == ("::1", 8443)
+    assert _parse_target("[2001:db8::1]") == ("2001:db8::1", 443)
+    # Bare (unbracketed) IPv6 is a literal host at the default port — never
+    # split on a colon inside the address.
+    assert _parse_target("::1") == ("::1", 443)
+
+
+def test_parse_target_rejects_unclosed_bracket_and_bad_port():
+    from cryptoscan.cli import _parse_target
+    for bad in ("[::1", "example.com:https", "[::1]:https"):
+        try:
+            _parse_target(bad)
+            assert False, f"expected ValueError for {bad!r}"
+        except ValueError:
+            pass
 
 
 def test_dependency_scan_skips_oversized_manifest(tmp_path):
@@ -1010,8 +1024,18 @@ def test_ike_weak_modp_group_is_classically_weak(monkeypatch):
 def test_ike_mlkem_group_is_pq_safe(monkeypatch):
     o = _ike.IKEObservation(host="h", port=500, is_response=True, dh_group=36)
     monkeypatch.setattr(_ike, "probe", lambda *a, **k: o)
-    f = next(f for f in _ike.scan("h", 500) if f.fact.name == "ML-KEM")
+    # Reported by its parameter set (group 36 = ML-KEM-768), not a bare "ML-KEM"
+    # — ML-KEM-512 (cat 1) must never be conflated with ML-KEM-1024 (cat 5).
+    f = next(f for f in _ike.scan("h", 500) if f.fact.name == "ML-KEM-768")
     assert f.fact.risk is QuantumRisk.SAFE and f.hndl_exposed() is False
+    # Each IKE ML-KEM group resolves to its own distinct fact.
+    names = {}
+    for grp in (35, 36, 37):
+        ob = _ike.IKEObservation(host="h", port=500, is_response=True, dh_group=grp)
+        monkeypatch.setattr(_ike, "probe", lambda *a, **k: ob)
+        names[grp] = next(fn.fact.name for fn in _ike.scan("h", 500)
+                          if fn.fact.name.startswith("ML-KEM"))
+    assert names == {35: "ML-KEM-512", 36: "ML-KEM-768", 37: "ML-KEM-1024"}
 
 
 def test_ike_invalid_ke_payload_yields_preferred_group():
@@ -1170,9 +1194,10 @@ def test_json_envelope_is_versioned(tmp_path):
 
 def test_assess_dispatches_to_all_endpoint_surfaces(monkeypatch):
     calls = []
-    monkeypatch.setattr(cli_mod, "_run_tls", lambda t: calls.append("tls") or [])
-    monkeypatch.setattr(cli_mod, "_run_ssh", lambda t: calls.append("ssh") or [])
-    monkeypatch.setattr(cli_mod, "_run_ike", lambda t: calls.append("ike") or [])
+    # Runners return (findings, reached); reached=1 keeps the scan 'complete'.
+    monkeypatch.setattr(cli_mod, "_run_tls", lambda t: (calls.append("tls") or [], 1))
+    monkeypatch.setattr(cli_mod, "_run_ssh", lambda t: (calls.append("ssh") or [], 1))
+    monkeypatch.setattr(cli_mod, "_run_ike", lambda t: (calls.append("ike") or [], 1))
     rc = cli_mod.main(["assess", "example.com", "--fail-on", "none"])
     assert calls == ["tls", "ssh", "ike"] and rc == 0
 
@@ -1194,6 +1219,353 @@ def test_pq_hybrid_status_distinguishes_negotiated_from_offered():
     assert observed == {"a:443": "X25519MLKEM768", "c:22": "SNTRUP761X25519"}
     assert offered == {"b:443"}
     assert "Post-quantum readiness" in _report.render(fs, "t")
+
+
+# --- v0.2.5 QAQC regression tests ------------------------------------------
+
+def test_ed448_reported_by_name_at_224_bits():
+    # Ed448 is a distinct ~224-bit curve — never folded into 128-bit Ed25519.
+    assert lookup("ed448").name == "Ed448"
+    assert lookup("ed448").classical_bits == 224
+    assert lookup("ed25519").name == "EdDSA"
+    assert lookup("ed25519").classical_bits == 128
+    # A parameter-less Ed448 finding reports 224, not the old fabricated 128.
+    fin = classify("Ed448", AssetType.SOURCE, "a.py:1")
+    assert fin.fact.risk is QuantumRisk.SHOR
+    assert fin.effective_classical_bits() == 224
+
+
+def test_pki_ed448_key_file_reported_as_ed448(tmp_path):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed448
+    from cryptoscan import pki_scanner
+    k = ed448.Ed448PrivateKey.generate()
+    (tmp_path / "e.key").write_bytes(k.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()))
+    fs = pki_scanner.scan(tmp_path)
+    assert any(f.fact.name == "Ed448" and f.effective_classical_bits() == 224
+               for f in fs)
+
+
+def test_pki_sig_token_never_drops_asymmetric_family():
+    from cryptoscan.pki_scanner import _sig_token
+    # Unregistered digest suffixes still resolve to the Shor-broken family.
+    assert _sig_token("ecdsa-with-SHA512") == "ECDSA"
+    assert _sig_token("dsa-with-sha256") == "DSA"
+    assert _sig_token("sha3-256WithRSAEncryption") == "RSA"
+    assert _sig_token("sha224WithRSAEncryption") == "RSA"
+    # Exact registry entries win (legacy-digest priority preserved).
+    assert lookup(_sig_token("sha1WithRSAEncryption")).name == "SHA-1"
+    assert lookup(_sig_token("sha256WithRSAEncryption")).name == "RSA"
+    # A PQ signature must never be misread as classical DSA by the 'dsa'
+    # substring — an unregistered ML-DSA variant is unknown, not DSA.
+    assert _sig_token("ml-dsa-99") is None
+    assert lookup(_sig_token("ml-dsa-65")).name == "ML-DSA"   # exact hit
+    assert _sig_token("dilithium-ish-unknown") is None
+
+
+def test_pki_ecdsa_sha512_signature_not_dropped(tmp_path):
+    import datetime
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptoscan import pki_scanner
+    key = ec.generate_private_key(ec.SECP521R1())
+    nm = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "p521.example")])
+    cert = (x509.CertificateBuilder().subject_name(nm).issuer_name(nm)
+            .public_key(key.public_key()).serial_number(1)
+            .not_valid_before(datetime.datetime(2024, 1, 1))
+            .not_valid_after(datetime.datetime(2027, 1, 1))
+            .sign(key, hashes.SHA512()))
+    (tmp_path / "c.crt").write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    fs = pki_scanner.scan(tmp_path)
+    # signature_algorithm 'ecdsa-with-SHA512' is not in the registry, but the
+    # ECDSA (Shor-broken) signature finding must still surface, not vanish.
+    sigs = [f for f in fs if f.extra.get("role") == "cert-signature"]
+    assert any(f.fact.name == "ECDSA" for f in sigs)
+
+
+def test_pki_keyusage_and_private_keyfile_are_hndl(tmp_path):
+    import datetime
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptoscan import pki_scanner
+
+    def _rsa_cert(ku):
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        nm = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "x.example")])
+        b = (x509.CertificateBuilder().subject_name(nm).issuer_name(nm)
+             .public_key(key.public_key()).serial_number(1)
+             .not_valid_before(datetime.datetime(2024, 1, 1))
+             .not_valid_after(datetime.datetime(2027, 1, 1)))
+        if ku is not None:
+            b = b.add_extension(ku, critical=True)
+        return b.sign(key, hashes.SHA256())
+
+    def _ku(**kw):
+        base = dict(digital_signature=False, content_commitment=False,
+                    key_encipherment=False, data_encipherment=False,
+                    key_agreement=False, key_cert_sign=False, crl_sign=False,
+                    encipher_only=False, decipher_only=False)
+        base.update(kw)
+        return x509.KeyUsage(**base)
+
+    # keyEncipherment (RSA key transport) -> HNDL CRITICAL.
+    kx = tmp_path / "kx.crt"
+    kx.write_bytes(_rsa_cert(_ku(key_encipherment=True)).public_bytes(
+        serialization.Encoding.PEM))
+    f = next(x for x in pki_scanner.scan(tmp_path)
+             if x.fact.name == "RSA" and x.extra.get("role") != "cert-signature")
+    assert f.hndl_exposed() is True and f.severity() is Severity.CRITICAL
+    kx.unlink()
+
+    # digitalSignature-only (TLS 1.3 auth cert) -> HIGH, not HNDL.
+    auth = tmp_path / "auth.crt"
+    auth.write_bytes(_rsa_cert(_ku(digital_signature=True)).public_bytes(
+        serialization.Encoding.PEM))
+    f = next(x for x in pki_scanner.scan(tmp_path)
+             if x.fact.name == "RSA" and x.extra.get("role") != "cert-signature")
+    assert f.hndl_exposed() is False
+    auth.unlink()
+
+    # A standalone private RSA key file is itself a decryption capability.
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    (tmp_path / "server.key").write_bytes(key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()))
+    f = next(x for x in pki_scanner.scan(tmp_path)
+             if x.fact.name == "RSA" and x.extra.get("role") == "key-file")
+    assert f.hndl_exposed() is True
+
+
+def test_ike_unknown_aes_keylen_is_generic_aes_not_fabricated_128(monkeypatch):
+    o = _ike.IKEObservation(host="h", port=500, is_response=True,
+                            encryption=("AES", None))
+    monkeypatch.setattr(_ike, "probe", lambda *a, **k: o)
+    names = {f.fact.name for f in _ike.scan("h", 500)}
+    assert "AES" in names and "AES-128" not in names   # no fabricated size
+    aes = next(f for f in _ike.scan("h", 500) if f.fact.name == "AES")
+    assert aes.effective_classical_bits() is None       # strength not invented
+
+
+def test_ike_keylen_found_when_not_first_attribute():
+    other = struct.pack(">HH", 0x8006, 0)                 # AF=1 TV attr, not KeyLen
+    keylen = struct.pack(">HH", _ike._ATTR_KEY_LENGTH, 256)
+    attrs = other + keylen
+    tr = struct.pack(">BBHBBH", 0, 0, 8 + len(attrs), 1, 0, 20) + attrs  # ENCR tid20
+    prop = struct.pack(">BBHBBBB", 0, 0, 8 + len(tr), 1, 1, 0, 1) + tr
+    sa = struct.pack(">BBH", 0, 0, 4 + len(prop)) + prop
+    hdr = struct.pack(">8s8sBBBBII", _ike._INIT_SPI, b"B" * 8, 33, 0x20, 34,
+                      0x20, 0, 28 + len(sa))
+    obs = _ike.parse_response(hdr + sa)
+    assert obs.encryption == ("AES", 256)                 # KeyLen found, not None
+
+
+def test_cbom_protocol_bomref_is_hashed_and_unique():
+    fs = [
+        classify("ECDHE", AssetType.TLS_ENDPOINT, "a.example:443",
+                 evidence="ECDHE-RSA-AES256-GCM-SHA384", key_establishment=True,
+                 extra={"protocol": "TLSv1.2", "role": "key-exchange"}),
+        classify("ECDHE", AssetType.TLS_ENDPOINT, "b.example:443",
+                 evidence="ECDHE-RSA-AES256-GCM-SHA384", key_establishment=True,
+                 extra={"protocol": "TLSv1.2", "role": "key-exchange"}),
+    ]
+    doc = cbom_mod.build_cbom(fs, "t")
+    refs = [c["bom-ref"] for c in doc["components"]]
+    assert len(refs) == len(set(refs))                    # all bom-refs unique
+    protos = [c for c in doc["components"]
+              if c["cryptoProperties"]["assetType"] == "protocol"]
+    assert len(protos) == 2
+    for p in protos:
+        ref_tail = p["bom-ref"].rsplit("/", 1)[-1]
+        assert ":" not in ref_tail                        # no raw host:port
+        assert any(pr["name"] == "greynoc:locator" for pr in p["properties"])
+
+
+def test_sarif_result_ruleindex_resolves_its_rule():
+    fs = [classify("MD5", AssetType.SOURCE, "src/a.py:3"),
+          classify("RSA", AssetType.DEPENDENCY, "requirements.txt -> node-rsa",
+                   key_establishment=True)]
+    doc = sarif_mod.build_sarif(fs, "t")
+    rules = doc["runs"][0]["tool"]["driver"]["rules"]
+    for res in doc["runs"][0]["results"]:
+        idx = res["ruleIndex"]
+        assert 0 <= idx < len(rules)
+        assert rules[idx]["id"] == res["ruleId"]
+
+
+def test_sarif_normalizes_windows_backslash_uri():
+    loc = sarif_mod._parse_locator(AssetType.SOURCE, "app\\pkg\\x.py:10")
+    assert loc["artifactLocation"]["uri"] == "app/pkg/x.py"
+    assert loc["region"]["startLine"] == 10
+
+
+def test_diff_moved_is_deterministically_sorted():
+    old = _envelope([classify("RSA", AssetType.SOURCE, "a.py:5"),
+                     classify("MD5", AssetType.SOURCE, "a.py:5")])
+    new = _envelope([classify("RSA", AssetType.SOURCE, "a.py:9"),
+                     classify("MD5", AssetType.SOURCE, "a.py:9")])
+    d = diff_mod.build_diff(old, new)
+    assert d["counts"]["moved"] == 2
+    assert d["moved"] == sorted(
+        d["moved"], key=lambda m: (m["algorithm"], m["from"], m["to"]))
+
+
+def test_cli_nonexistent_code_path_exits_3(tmp_path):
+    missing = str(tmp_path / "does-not-exist")
+    assert cli_mod.main(["code", missing]) == 3
+    # --fail-on none does not rescue a path that cannot be scanned at all.
+    assert cli_mod.main(["code", missing, "--fail-on", "none"]) == 3
+
+
+def test_cli_all_errored_endpoint_scan_is_incomplete(monkeypatch):
+    class _Obs:
+        error = "timeout"
+    monkeypatch.setattr(cli_mod.tls_scanner, "probe", lambda *a, **k: _Obs())
+    # Every target errors -> 0 findings -> scan incomplete -> exit 3 (NOT 0/100).
+    assert cli_mod.main(["tls", "unreachable.example:443"]) == 3
+    # ...but inventory-only mode (--fail-on none) suppresses it.
+    assert cli_mod.main(["tls", "unreachable.example:443",
+                         "--fail-on", "none"]) == 0
+
+
+def test_symlinked_dir_is_not_followed(tmp_path):
+    # A directory symlink must not let the scan escape its root or loop. Skipped
+    # where symlink creation is unprivileged/unavailable (e.g. plain Windows).
+    import os as _os
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text("rsa_key = RSA.generate(2048)\n",
+                                       encoding="utf-8")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "real.py").write_text("h = hashlib.md5(b'')\n", encoding="utf-8")
+    try:
+        _os.symlink(outside, root / "link", target_is_directory=True)
+    except (OSError, NotImplementedError, AttributeError):
+        import pytest
+        pytest.skip("symlink creation not permitted here")
+    fs = _cs.scan(root)
+    assert any(f.fact.name == "MD5" for f in fs)          # in-root file scanned
+    assert not any("secret.py" in f.locator for f in fs)  # symlink not followed
+
+
+def test_symlinked_file_is_still_followed(tmp_path):
+    # A *file* symlink to a regular in-tree file must still be scanned (the
+    # /etc/ssl/certs pattern). Directory containment is separate (test above).
+    import os as _os
+    (tmp_path / "real.py").write_text("h = hashlib.md5(b'')\n", encoding="utf-8")
+    try:
+        _os.symlink(tmp_path / "real.py", tmp_path / "alias.py")
+    except (OSError, NotImplementedError, AttributeError):
+        import pytest
+        pytest.skip("symlink creation not permitted here")
+    fs = _cs.scan(tmp_path)
+    assert any(f.locator.startswith("alias.py") for f in fs)   # followed, not skipped
+
+
+# --- v0.2.5 QAQC round-2 (verification-workflow findings) ------------------
+
+def test_windows_junction_is_not_traversed(tmp_path):
+    # A Windows junction is a reparse point but NOT a symlink, so os.walk would
+    # descend into it — _is_reparse must catch it so the scan can't escape/loop.
+    # Skipped off Windows / where junction creation is unavailable.
+    import subprocess
+    import sys
+    if sys.platform != "win32":
+        import pytest
+        pytest.skip("junctions are Windows-only")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text("rsa_key = RSA.generate(2048)\n",
+                                       encoding="utf-8")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "real.py").write_text("h = hashlib.md5(b'')\n", encoding="utf-8")
+    rc = subprocess.run(["cmd", "/c", "mklink", "/J",
+                         str(root / "jx"), str(outside)],
+                        capture_output=True)
+    if rc.returncode != 0:
+        import pytest
+        pytest.skip("could not create a junction here")
+    assert _cs._is_reparse(root / "jx") is True
+    fs = _cs.scan(root)
+    assert any(f.fact.name == "MD5" for f in fs)             # in-root file scanned
+    assert not any("secret.py" in f.locator for f in fs)     # junction not followed
+
+
+def test_ssh_ed448_hostkey_reported_as_ed448():
+    from cryptoscan import ssh_scanner as ssh
+    token, role, _ke = ssh.SSH_ALGO_MAP["ssh-ed448"]
+    assert token == "Ed448" and role == "hostkey"
+    f = classify(token, AssetType.SSH_ENDPOINT, "h:22", evidence="ssh-ed448")
+    assert f.fact.name == "Ed448" and f.effective_classical_bits() == 224
+
+
+def test_ike_reached_but_no_proposal_is_not_incomplete(monkeypatch):
+    # A reachable gateway replying NO_PROPOSAL_CHOSEN yields zero findings but was
+    # REACHED — it must not be misreported as unreachable / forced to exit 3.
+    o = _ike.IKEObservation(host="h", port=500, is_response=True, notify=14)
+    monkeypatch.setattr(_ike, "probe", lambda *a, **k: o)
+    findings, reached = cli_mod._run_ike(["gw.example"])
+    assert findings == [] and reached == 1
+    assert cli_mod.main(["ike", "gw.example"]) == 0     # complete, no findings
+
+
+def test_parse_target_rejects_trailing_junk_after_bracket():
+    from cryptoscan.cli import _parse_target
+    try:
+        _parse_target("[::1]8443")           # dropped ':' — must not silently pass
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+def test_diff_tolerates_null_locator(tmp_path):
+    # A findings JSON with an explicit null locator must not crash the new sort.
+    fp_a, fp_b = "a" * 16, "b" * 16
+    old = {"target": "t", "summary": {}, "findings": []}
+    new = {"target": "t", "summary": {},
+           "findings": [{"fingerprint": fp_a, "algorithm": "RSA",
+                         "asset_type": "dependency", "locator": None},
+                        {"fingerprint": fp_b, "algorithm": "MD5",
+                         "asset_type": "source", "locator": "x.py:1"}]}
+    d = diff_mod.build_diff(old, new)          # must not raise TypeError
+    assert d["counts"]["introduced"] == 2
+
+
+def test_cbom_generic_aes_omits_nist_level():
+    f = classify("AES", AssetType.IKE_ENDPOINT, "h:500", evidence="AES")
+    ap = cbom_mod._algorithm_component(f)["cryptoProperties"]["algorithmProperties"]
+    # Unknown key size -> the optional field is omitted, not a fabricated 0.
+    assert "nistQuantumSecurityLevel" not in ap
+    assert ap["primitive"] == "block-cipher"
+
+
+def test_cli_scan_incomplete_when_all_endpoints_unreachable(monkeypatch, tmp_path):
+    # 'scan' with requested endpoints that all error is incomplete -> exit 3,
+    # even though the code half of the scan ran against a real path.
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+
+    class _Obs:
+        error = "timeout"
+    monkeypatch.setattr(cli_mod.tls_scanner, "probe", lambda *a, **k: _Obs())
+    rc = cli_mod.main(["scan", str(tmp_path), "--tls", "unreachable:443"])
+    assert rc == 3
+
+
+def test_cli_json_envelope_carries_scan_status(monkeypatch, tmp_path):
+    class _Obs:
+        error = "timeout"
+    monkeypatch.setattr(cli_mod.tls_scanner, "probe", lambda *a, **k: _Obs())
+    jf = tmp_path / "out.json"
+    cli_mod.main(["tls", "unreachable:443", "--json", str(jf), "--fail-on", "none"])
+    d = _json.loads(jf.read_text(encoding="utf-8"))
+    assert d["scan_status"] == "incomplete"
 
 
 if __name__ == "__main__":

@@ -118,7 +118,7 @@ def _key_details(cert: x509.Certificate) -> tuple[str, int | None, str | None]:
     if isinstance(pk, ed25519.Ed25519PublicKey):
         return "EdDSA", 256, "ed25519"
     if isinstance(pk, ed448.Ed448PublicKey):
-        return "EdDSA", 448, "ed448"
+        return "Ed448", 448, "ed448"
     return type(pk).__name__, None, None
 
 
