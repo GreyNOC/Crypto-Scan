@@ -143,8 +143,19 @@ _reg(CryptoFact("ECDH", Primitive.KEY_AGREE, QuantumRisk.SHOR, 128, 0,
 
 _reg(CryptoFact("EdDSA", Primitive.SIGNATURE, QuantumRisk.SHOR, 128, 0,
                 migrate_to=PQ_SIG,
-                note="Edwards-curve signatures (Ed25519/Ed448); ECDLP."),
-     "ed25519", "ed448")
+                note="Edwards-curve signature (EdDSA; RFC 8032/8037). Bits shown "
+                     "assume Ed25519 (~128-bit); an Ed448 key is classified "
+                     "separately at ~224-bit. ECDLP — Shor-broken."),
+     "ed25519")
+
+# Ed448 is a distinct curve at ~224-bit classical strength — never fold it into
+# the 128-bit Ed25519 fact (that would under-report its strength by nearly half,
+# and contradicts CURVE_FACTS below). Report it by name.
+_reg(CryptoFact("Ed448", Primitive.SIGNATURE, QuantumRisk.SHOR, 224, 0,
+                migrate_to=PQ_SIG,
+                note="Ed448 Edwards-curve signature (RFC 8032); ECDLP, "
+                     "~224-bit classical."),
+     "ed448")
 
 _reg(CryptoFact("DH", Primitive.KEY_AGREE, QuantumRisk.SHOR, 112, 0,
                 migrate_to=PQ_KEM,
@@ -224,6 +235,17 @@ _reg(CryptoFact("AES-192", Primitive.BLOCK_CIPHER, QuantumRisk.GROVER, 192, 96,
 _reg(CryptoFact("AES-256", Primitive.BLOCK_CIPHER, QuantumRisk.SAFE, 256, 128,
                 note="Grover -> ~128-bit effective; CNSA 2.0 approved."),
      "aes256", "aes-256-gcm", "aes_256_gcm", "aes-256-cbc", "aes256-gcm")
+
+# AES with an unstated key size. Some wire formats name AES without a key length
+# (an IKEv2 ENCR transform whose Key Length attribute we could not recover); the
+# honest report is "AES, size unknown" — never a fabricated AES-128. Grover-class
+# and treated conservatively (MEDIUM) until the key size is known; classical/
+# quantum bits stay None so no strength or NIST category is invented.
+_reg(CryptoFact("AES", Primitive.BLOCK_CIPHER, QuantumRisk.GROVER, None, None,
+                migrate_to=("AES-256",),
+                note="AES with an unstated key size — the observed transform did "
+                     "not carry a Key Length, so the exact strength is unknown."),
+     "aes")
 
 # ChaCha20 is its own stream cipher — report it by name, never as AES-256.
 _reg(CryptoFact("ChaCha20", Primitive.STREAM_CIPHER, QuantumRisk.SAFE, 256, 128,
@@ -307,10 +329,23 @@ _reg(CryptoFact("NULL-ENCRYPTION", Primitive.OTHER, QuantumRisk.LEGACY, 0, 0,
      "null", "null-encryption", "encr_null")
 
 # --- PQC standardized: safe ------------------------------------------------
+# ML-KEM, reported by parameter set where the wire names one (e.g. an IKEv2
+# ML-KEM DH group) — ML-KEM-512 (NIST cat 1) must not be conflated with
+# ML-KEM-1024 (cat 5), the same fidelity discipline the hybrid groups follow.
+# A bare 'kyber'/'mlkem' with no set stays the generic ML-KEM fact.
+_reg(CryptoFact("ML-KEM-512", Primitive.PKE, QuantumRisk.SAFE, standard="FIPS 203",
+                note="Module-Lattice KEM (FIPS 203) parameter set, NIST category 1."),
+     "ml-kem-512")
+_reg(CryptoFact("ML-KEM-768", Primitive.PKE, QuantumRisk.SAFE, standard="FIPS 203",
+                note="Module-Lattice KEM (FIPS 203) parameter set, NIST category 3."),
+     "ml-kem-768")
+_reg(CryptoFact("ML-KEM-1024", Primitive.PKE, QuantumRisk.SAFE, standard="FIPS 203",
+                note="Module-Lattice KEM (FIPS 203) parameter set, NIST category 5."),
+     "ml-kem-1024")
 _reg(CryptoFact("ML-KEM", Primitive.PKE, QuantumRisk.SAFE,
                 standard="FIPS 203",
                 note="Module-Lattice KEM (Kyber). Target for key establishment."),
-     "ml-kem-512", "ml-kem-768", "ml-kem-1024", "kyber", "kyber768", "mlkem")
+     "kyber", "kyber768", "mlkem")
 
 _reg(CryptoFact("ML-DSA", Primitive.SIGNATURE, QuantumRisk.SAFE,
                 standard="FIPS 204",

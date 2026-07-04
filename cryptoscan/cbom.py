@@ -15,6 +15,7 @@ nistQuantumSecurityLevel and our own GreyNOC risk properties.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import datetime, timezone
 
@@ -32,7 +33,7 @@ TOOL_VERSION = __version__
 # 0 = offers no quantum security for its hard problem; 1..5 = NIST categories
 # (1≈AES-128 brute force, 3≈AES-192, 5≈AES-256). We only assert a category
 # where NIST actually pins one — Shor/Legacy primitives and bare hashes get 0.
-def _nist_level(f: Finding) -> int:
+def _nist_level(f: Finding) -> int | None:
     risk = f.fact.risk
     if risk in (QuantumRisk.SHOR, QuantumRisk.LEGACY):
         return 0
@@ -40,7 +41,10 @@ def _nist_level(f: Finding) -> int:
     cb = f.fact.classical_bits
     if prim in (Primitive.BLOCK_CIPHER, Primitive.STREAM_CIPHER):
         if cb is None:
-            return 0
+            # Key size unknown (e.g. generic 'AES' from an IKE transform with no
+            # Key Length): assert nothing — every real AES is >= category 1, so a
+            # 0 ("no quantum security") would be a fabricated understatement.
+            return None
         if cb >= 256:
             return 5
         if cb >= 192:
@@ -102,18 +106,25 @@ _SUITE_ROLES = {"key-exchange", "authentication", "bulk-cipher", "mac"}
 
 
 def _algorithm_component(f: Finding) -> dict:
-    comp = {
+    algo_props = {
+        "primitive": _primitive_to_cdx(f.fact.primitive),
+        "executionEnvironment": "software-plain-ram",
+        "cryptoFunctions": _crypto_functions(f),
+    }
+    # Only assert a NIST category where one is actually known — omit the optional
+    # field for an unknown-strength primitive rather than fabricate a level.
+    level = _nist_level(f)
+    if level is not None:
+        algo_props["nistQuantumSecurityLevel"] = level
+    if f.parameter:
+        algo_props["parameterSetIdentifier"] = str(f.parameter)
+    return {
         "type": "cryptographic-asset",
         "bom-ref": f"crypto/{f.fingerprint}",
         "name": f.fact.name,
         "cryptoProperties": {
             "assetType": "algorithm",
-            "algorithmProperties": {
-                "primitive": _primitive_to_cdx(f.fact.primitive),
-                "executionEnvironment": "software-plain-ram",
-                "cryptoFunctions": _crypto_functions(f),
-                "nistQuantumSecurityLevel": _nist_level(f),
-            },
+            "algorithmProperties": algo_props,
         },
         "evidence": {
             "occurrences": [
@@ -122,9 +133,6 @@ def _algorithm_component(f: Finding) -> dict:
         },
         "properties": _greynoc_properties(f),
     }
-    if f.parameter:
-        comp["cryptoProperties"]["algorithmProperties"]["parameterSetIdentifier"] = str(f.parameter)
-    return comp
 
 
 def _certificate_component(f: Finding) -> dict:
@@ -171,9 +179,13 @@ def _protocol_component(locator: str, protocol: str | None,
     if cipher_suites:
         pp["cipherSuites"] = [{"name": cs} for cs in cipher_suites]
     name = f"TLS {_tls_version(protocol)}".strip() if protocol else "TLS"
+    # Hash the locator into the bom-ref: CycloneDX requires bom-refs to be unique
+    # within the BOM, and a raw 'host:port' locator is neither guaranteed unique
+    # nor a clean ref. The human-readable locator is kept in the properties.
+    ref = hashlib.sha256(locator.encode()).hexdigest()[:16]
     return {
         "type": "cryptographic-asset",
-        "bom-ref": f"crypto/protocol/{locator}",
+        "bom-ref": f"crypto/protocol/{ref}",
         "name": name,
         "cryptoProperties": {
             "assetType": "protocol",

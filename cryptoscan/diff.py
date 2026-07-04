@@ -87,7 +87,10 @@ def diff_findings(old: list[dict], new: list[dict]) -> dict:
     new_ix = index_by_fingerprint(new)
 
     persisting = [new_ix[fp] for fp in new_ix if fp in old_ix]
-    intro_fps = [fp for fp in new_ix if fp not in old_ix]
+    # Sort by locator so MOVED pairing (and thus the rendered from->to rows) is
+    # deterministic even when several same-key findings share a bucket.
+    intro_fps = sorted((fp for fp in new_ix if fp not in old_ix),
+                       key=lambda fp: new_ix[fp].get("locator") or "")
     resolved_fps = [fp for fp in old_ix if fp not in new_ix]
 
     # Re-pair MOVED source findings by their locator-stable secondary key.
@@ -96,6 +99,8 @@ def diff_findings(old: list[dict], new: list[dict]) -> dict:
         f = old_ix[fp]
         if f.get("asset_type") == "source":
             old_sec.setdefault(secondary_key(f), []).append(fp)
+    for bucket in old_sec.values():
+        bucket.sort(key=lambda fp: old_ix[fp].get("locator") or "")
 
     moved: list[dict] = []
     consumed_old: set[str] = set()
@@ -118,6 +123,8 @@ def diff_findings(old: list[dict], new: list[dict]) -> dict:
                 consumed_old.add(bucket.pop(0))
         introduced.append(f)
     resolved = [old_ix[fp] for fp in resolved_fps if fp not in consumed_old]
+    moved.sort(key=lambda m: (m.get("algorithm") or "", m.get("from") or "",
+                              m.get("to") or ""))
 
     return {
         "introduced": introduced,

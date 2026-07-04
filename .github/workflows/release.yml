@@ -54,7 +54,9 @@ jobs:
           python-version: "3.12"
       - run: |
           python -m pip install --upgrade pip
-          python -m pip install -e . pyinstaller
+          # Bound the PyInstaller major so a future incompatible release can't
+          # silently change how the portable is built mid-project.
+          python -m pip install -e . "pyinstaller>=6,<7"
 
       - name: Build portable binary
         run: python packaging/build_portable.py
@@ -102,6 +104,10 @@ jobs:
           echo "tag=$VERSION pyproject=$PYPROJ _version=$VER"
           [ "$VERSION" = "$PYPROJ" ] || { echo "::error::tag != pyproject version"; exit 1; }
           [ "$VERSION" = "$VER" ] || { echo "::error::tag != _version.py"; exit 1; }
+          # Gate the human-facing CHANGELOG as a first-class check, not just an
+          # accidental side effect of notes generation later.
+          python packaging/changelog_section.py "$VERSION" >/dev/null \
+            || { echo "::error::no CHANGELOG.md section for $VERSION"; exit 1; }
 
       - name: Checksums + notes
         run: |
@@ -115,8 +121,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-              --title "${GITHUB_REF_NAME}" \
-              --notes-file NOTES.md \
-              staged/* \
-          || gh release upload "${GITHUB_REF_NAME}" staged/* --clobber
+          # Branch explicitly on existence so a genuine 'create' failure aborts
+          # the job instead of silently falling through to a clobbering upload
+          # (the '|| upload --clobber' form masked real create failures).
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" staged/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+                --title "${GITHUB_REF_NAME}" \
+                --notes-file NOTES.md \
+                staged/*
+          fi

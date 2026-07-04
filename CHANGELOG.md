@@ -3,6 +3,69 @@
 All notable changes to GreyNOC CryptoScan are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.5] — QAQC hardening pass (no-fabrication, safety, fidelity)
+
+A multi-surface adversarial review (correctness + no-fabrication + schema-validity
++ safety) with a verified fix and a regression test for every finding. No new
+scan surfaces; the existing ones report more faithfully and fail safe.
+
+### Fixed — no-fabrication (the cardinal rule)
+- **IKEv2 AES key size is never invented.** A negotiated AES transform whose Key
+  Length attribute could not be recovered was reported as a fabricated
+  `AES-128`; it is now reported as generic `AES` (Grover-class, size unknown,
+  no invented strength/NIST level). The transform parser also scans *all*
+  attributes for Key Length (RFC 7296 does not require it to be first), so a real
+  AES-256 gateway is no longer mislabeled AES-128.
+- **IKEv2 ML-KEM groups keep their parameter set.** Groups 35/36/37 now report as
+  `ML-KEM-512` / `ML-KEM-768` / `ML-KEM-1024` (NIST cat 1/3/5) instead of a bare
+  `ML-KEM` — the same fidelity discipline the TLS/SSH hybrid groups already follow.
+- **Ed448 is reported by name at ~224-bit strength**, not folded into the 128-bit
+  Ed25519 fact (which contradicted the curve table and under-reported it). Every
+  surface was updated — TLS/PKI key files, SSH `ssh-ed448` host keys, and source.
+  The generic `EdDSA` note stays curve-agnostic for JOSE `EdDSA` (no curve named).
+- **CBOM protocol `bom-ref`s are hashed**, not raw `host:port` strings, so they
+  are guaranteed unique per the CycloneDX 1.6 constraint (locator kept in props).
+
+### Fixed — false negatives (silent misses)
+- **Certificate signature algorithms are no longer silently dropped.** An
+  unrecognized digest suffix (`ecdsa-with-SHA512`, `dsa-with-sha256`,
+  `sha3-256WithRSAEncryption`, SHA-224…) previously yielded *zero* signature
+  findings; it now falls back to the asymmetric family so the Shor-broken
+  signature always surfaces.
+- **RSA key-establishment is now HNDL-assessed.** A cert whose KeyUsage asserts
+  keyEncipherment/dataEncipherment/keyAgreement, and any standalone *private* RSA
+  key file, is flagged key-establishment → HNDL-exposed and seen by the Mosca
+  engine (a directory of RSA private keys previously reported zero HNDL risk).
+  Auth-only certs (e.g. TLS 1.3 digitalSignature) stay HIGH, not HNDL CRITICAL.
+- **Minified/bundled single-line source is scanned** (per-line cap raised from
+  1 KB to 50 KB), so crypto calls buried past column 1000 are no longer missed.
+
+### Fixed — safety / CI integrity
+- **Directory-link traversal is contained.** Scans walk with `followlinks=False`
+  and prune reparse-point subdirectories — covering both POSIX directory symlinks
+  and **Windows junctions** (which are not symlinks, so an `is_symlink` check
+  alone missed them) — so a directory link can neither escape the scan root nor
+  spin an unbounded loop (DoS). Symlinked *files* are still followed, so
+  symlink-based cert stores (e.g. `/etc/ssl/certs`) scan as before.
+- **A scan that could not measure its target no longer reports a clean `0/100`.**
+  Incompleteness is now judged by reachability, not by an empty finding set — a
+  reachable endpoint that negotiates nothing (e.g. IKE `NO_PROPOSAL_CHOSEN`) is
+  complete, but a run where *no* target responded, or a nonexistent `code`/`scan`
+  path, exits **3** ("scan incomplete"). The `--json` envelope carries a
+  `scan_status` field so a downstream diff/dashboard sees it too. `--fail-on none`
+  suppresses the endpoint-incomplete exit 3 (a nonexistent path still exits 3).
+- **Release publish fails loudly.** The `gh release create || upload --clobber`
+  fallback (which masked a genuine create failure) is now an explicit
+  exists-check branch; the CHANGELOG-section check is a first-class release gate;
+  the PyInstaller major is pinned; `changelog_section` anchors on the version's
+  own heading (no mid-line/backport-mention false match).
+- **IPv6 targets parse correctly.** `[host]:port` now honors the explicit port
+  (previously dropped) and bare/bracketed IPv6 is treated as a literal host.
+
+### Fixed — determinism
+- **Posture-diff MOVED pairing is deterministic** (candidates and the rendered
+  from→to rows are sorted), so diff output stays byte-stable across runs.
+
 ## [0.2.4] — post-scan analysis pass (perf, UX, guards)
 
 Polish from a full analyze-and-improve pass over the mature codebase. No new

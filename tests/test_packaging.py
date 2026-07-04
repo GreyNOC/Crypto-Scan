@@ -51,6 +51,15 @@ def test_changelog_section_missing_version_returns_none():
     assert changelog_section.section("9.9.9", _SAMPLE) is None
 
 
+def test_changelog_section_ignores_midline_version_mention():
+    # A heading that merely mentions the version mid-line (e.g. a backport note)
+    # must not be captured — only the version's own '## [ver]' heading anchors it.
+    cl = ("## [0.2.2] - real\nreal body.\n\n"
+          "## Backported [0.2.1] fixes\nnot the 0.2.1 section.\n\n"
+          "## [0.2.1] - patch\npatch body.\n")
+    assert changelog_section.section("0.2.1", cl).strip() == "patch body."
+
+
 def test_make_archive_round_trips(tmp_path):
     src = tmp_path / "payload"
     src.mkdir()

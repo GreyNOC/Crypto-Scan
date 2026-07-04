@@ -161,12 +161,19 @@ def _parse_sa(body: bytes) -> list[tuple[int, int, int | None]]:
         _l, _r2, tlen, ttype, _r3, tid = struct.unpack_from(">BBHBBH", body, off)
         if tlen < 8:
             break
+        # Scan ALL of the transform's attributes for Key Length — RFC 7296 does
+        # not require it to be first, and reading only the first attribute would
+        # miss it (leaving an AES transform with an unknown, later-fabricated
+        # size). Handle both the TV (AF=1, fixed 4 bytes) and TLV forms.
         keybits = None
-        attr = body[off + 8:off + tlen]
-        if len(attr) >= 4:
-            atype, aval = struct.unpack_from(">HH", attr, 0)
+        attrs = body[off + 8:off + tlen]
+        ao = 0
+        while ao + 4 <= len(attrs):
+            atype, aval = struct.unpack_from(">HH", attrs, ao)
             if atype == _ATTR_KEY_LENGTH:
                 keybits = aval
+                break
+            ao += 4 if (atype & 0x8000) else (4 + aval)
         out.append((ttype, tid, keybits))
         off += tlen
     return out
@@ -241,8 +248,9 @@ def probe(host: str, port: int = 500, timeout: float = 5.0) -> IKEObservation:
 
 
 def _aes_token(keybits: int | None) -> str:
-    return {128: "AES-128", 192: "AES-192", 256: "AES-256"}.get(keybits or 0,
-                                                                "AES-128")
+    # No fabricated size: an AES transform whose Key Length we could not recover
+    # is reported as generic "AES" (Grover-class, size unknown), never AES-128.
+    return {128: "AES-128", 192: "AES-192", 256: "AES-256"}.get(keybits, "AES")
 
 
 def scan(host: str, port: int = 500, timeout: float = 5.0, *,

@@ -13,6 +13,7 @@ but not decrypted (no passwords are tried).
 
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
 
@@ -23,10 +24,15 @@ from cryptography.hazmat.primitives.asymmetric import (
 from cryptography.hazmat.primitives.serialization import pkcs7
 
 from .classifier import Finding, AssetType, classify
-from .code_scanner import SKIP_DIRS, MAX_FILE_BYTES, _rel_parts
+from .primitives import lookup
+from .code_scanner import SKIP_DIRS, MAX_FILE_BYTES, _is_reparse
 
 PKI_EXTS = {".pem", ".crt", ".cer", ".der", ".p7b", ".p7c", ".p7s",
             ".key", ".pub", ".csr"}
+
+# Cap certs parsed from one file: a 2 MB PEM/PKCS#7 bundle can pack tens of
+# thousands of tiny certs, amplifying into a huge object/finding list.
+MAX_CERTS_PER_FILE = 1000
 
 
 def _key_token(pubkey) -> tuple[str, str | None]:
@@ -38,7 +44,7 @@ def _key_token(pubkey) -> tuple[str, str | None]:
     if isinstance(pubkey, ed25519.Ed25519PublicKey):
         return "EdDSA", "ed25519"
     if isinstance(pubkey, ed448.Ed448PublicKey):
-        return "EdDSA", "ed448"
+        return "Ed448", "ed448"
     if isinstance(pubkey, dsa.DSAPublicKey):
         return "DSA", str(pubkey.key_size)
     # Key-agreement key files are HNDL crown jewels — must not be dropped.
@@ -52,17 +58,26 @@ def _key_token(pubkey) -> tuple[str, str | None]:
 
 
 def _iter_pki_files(root: Path):
-    for p in root.rglob("*"):
-        if p.is_dir() or any(part in SKIP_DIRS for part in _rel_parts(p, root)):
-            continue
-        if p.suffix.lower() not in PKI_EXTS:
-            continue
-        try:
-            st = p.stat()
-        except OSError:
-            continue
-        if stat.S_ISREG(st.st_mode) and 0 < st.st_size <= MAX_FILE_BYTES:
-            yield p
+    # os.walk(followlinks=False) + reparse-point pruning (_is_reparse covers
+    # symlinks AND Windows junctions) so a directory link can neither escape the
+    # scan root (reading key material outside it) nor spin an unbounded loop;
+    # SKIP_DIRS is pruned by child name (relative to root, never absolute).
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dp = Path(dirpath)
+        dirnames[:] = [d for d in dirnames
+                       if d not in SKIP_DIRS and not _is_reparse(dp / d)]
+        for fn in filenames:
+            p = dp / fn
+            if p.suffix.lower() not in PKI_EXTS:
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            # stat() follows a file symlink; S_ISREG keeps only regular targets,
+            # so symlinked cert stores (e.g. /etc/ssl/certs) still scan.
+            if stat.S_ISREG(st.st_mode) and 0 < st.st_size <= MAX_FILE_BYTES:
+                yield p
 
 
 def _load_certs(data: bytes) -> list[x509.Certificate]:
@@ -76,10 +91,57 @@ def _load_certs(data: bytes) -> list[x509.Certificate]:
         try:
             certs = loader(data)
             if certs:
-                return certs
+                return certs[:MAX_CERTS_PER_FILE]
         except Exception:  # noqa: BLE001 — try the next format
             continue
     return []
+
+
+def _sig_token(sig: str) -> str | None:
+    """Map a certificate signatureAlgorithm OID name to a registry token.
+
+    Prefers an exact registry entry (which deliberately reports a legacy digest,
+    e.g. ``sha1WithRSAEncryption`` -> SHA-1). Otherwise falls back to the
+    asymmetric family, so an unrecognized digest suffix (``ecdsa-with-SHA512``,
+    ``dsa-with-sha256``, ``sha3-256WithRSAEncryption``, ...) never silently
+    suppresses the Shor-broken signature finding — the false-negative direction.
+    """
+    if not sig:
+        return None
+    s = sig.lower()
+    if lookup(s) is not None:
+        return s
+    # A post-quantum signature is trusted only via an exact registry hit (above).
+    # Never let the 'dsa'/'rsa' substring heuristic below misread ML-DSA/SLH-DSA
+    # as classical DSA — an unknown PQ variant falls through to None (unknown),
+    # not a fabricated classical family.
+    if any(p in s for p in ("ml-dsa", "mldsa", "slh-dsa", "slhdsa", "dilithium",
+                            "sphincs", "falcon", "ml-kem", "mlkem", "kyber")):
+        return None
+    if "ecdsa" in s:
+        return "ECDSA"
+    if "ed25519" in s:
+        return "EdDSA"
+    if "ed448" in s:
+        return "Ed448"
+    if "dsa" in s:          # non-EC DSA (ecdsa is handled above)
+        return "DSA"
+    if "rsa" in s:
+        return "RSA"
+    return None
+
+
+def _cert_key_establishment(cert: x509.Certificate) -> bool:
+    """True when the cert's KeyUsage marks it for key transport / agreement
+    (keyEncipherment / dataEncipherment / keyAgreement) — an HNDL-exposed
+    key-establishment certificate, distinct from a signature/auth-only one
+    (e.g. a TLS 1.3 leaf), which stays HIGH rather than a HNDL CRITICAL."""
+    try:
+        ku = cert.extensions.get_extension_for_class(x509.KeyUsage).value
+        return bool(ku.key_encipherment or ku.data_encipherment
+                    or ku.key_agreement)
+    except Exception:  # noqa: BLE001 — absent/invalid KeyUsage: treat as auth-only
+        return False
 
 
 def _load_public_key(data: bytes):
@@ -120,6 +182,7 @@ def _emit_cert(cert: x509.Certificate, locator: str,
     f = classify(token, AssetType.CERTIFICATE, locator,
                  evidence=f"{token}-{param or '?'}",
                  parameter=param,
+                 key_establishment=_cert_key_establishment(cert),
                  extra={"subject": subject, "issuer": issuer,
                         "not_before": nvb, "not_after": nva})
     if f and f.fingerprint not in seen:
@@ -131,7 +194,8 @@ def _emit_cert(cert: x509.Certificate, locator: str,
     except Exception:  # noqa: BLE001
         sig = None
     if sig:
-        s = classify(sig, AssetType.CERTIFICATE, locator, evidence=sig,
+        s = classify(_sig_token(sig) or sig, AssetType.CERTIFICATE, locator,
+                     evidence=sig,
                      extra={"role": "cert-signature", "subject": subject})
         if s and s.fingerprint not in seen:
             seen.add(s.fingerprint)
@@ -155,13 +219,23 @@ def scan(root: str | Path) -> list[Finding]:
             for cert in certs:
                 _emit_cert(cert, rel, findings, seen)
             continue
-        key = _load_public_key(data) or _load_private_key(data)
-        if key is not None:
-            pub = key.public_key() if hasattr(key, "public_key") else key
+        pub = _load_public_key(data)
+        is_private = False
+        if pub is None:
+            priv = _load_private_key(data)
+            if priv is not None:
+                pub = priv.public_key() if hasattr(priv, "public_key") else priv
+                is_private = True
+        if pub is not None:
             token, param = _key_token(pub)
             f = classify(token, AssetType.CERTIFICATE, rel,
                          evidence=f"key:{token}-{param or '?'}",
-                         parameter=param, extra={"role": "key-file"})
+                         parameter=param,
+                         # A *private* RSA key file is a decryption capability —
+                         # HNDL-exposed if it ever wrapped a session key. (DH/
+                         # X25519/X448 keys are KEY_AGREE and already key-est.)
+                         key_establishment=(is_private and token == "RSA"),
+                         extra={"role": "key-file"})
             if f and f.fingerprint not in seen:
                 seen.add(f.fingerprint)
                 findings.append(f)
