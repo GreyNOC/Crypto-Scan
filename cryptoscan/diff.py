@@ -47,7 +47,12 @@ def load_findings_json(path: str) -> dict:
         fp = f.get("fingerprint") if isinstance(f, dict) else None
         if not isinstance(fp, str) or not _FINGERPRINT_RE.match(fp):
             raise ValueError(f"{path}: finding missing a 16-hex fingerprint")
-    data.setdefault("summary", {})
+    # setdefault only fills an ABSENT summary; a present-but-non-dict summary
+    # (list/scalar from a tampered or older-format envelope) would sail through
+    # and later crash _summary_deltas with an AttributeError. Coerce it to {} so
+    # a malformed summary degrades to zero deltas, not a raw traceback.
+    summary = data.get("summary")
+    data["summary"] = summary if isinstance(summary, dict) else {}
     return data
 
 
@@ -150,16 +155,31 @@ def verdict(diff: dict) -> str:
 
 
 def _summary_deltas(old_s: dict, new_s: dict) -> dict:
+    # Defensive: build_diff can be called directly with hand-built/tampered
+    # documents whose summary (or its by_severity) is not a dict, or whose counts
+    # are non-numeric. Coerce everything so a malformed summary yields zero deltas
+    # instead of an AttributeError/TypeError traceback.
+    if not isinstance(old_s, dict):
+        old_s = {}
+    if not isinstance(new_s, dict):
+        new_s = {}
+
+    def num(v):
+        return v if isinstance(v, (int, float)) else 0
+
     def d(key):
-        return (new_s.get(key, 0) or 0) - (old_s.get(key, 0) or 0)
-    sev_old = old_s.get("by_severity", {})
-    sev_new = new_s.get("by_severity", {})
+        return num(new_s.get(key)) - num(old_s.get(key))
+
+    sev_old = old_s.get("by_severity")
+    sev_new = new_s.get("by_severity")
+    sev_old = sev_old if isinstance(sev_old, dict) else {}
+    sev_new = sev_new if isinstance(sev_new, dict) else {}
     return {
         "pq_readiness_score": d("pq_readiness_score"),
         "hndl_exposed": d("hndl_exposed"),
         "quantum_vulnerable": d("quantum_vulnerable"),
         "total_findings": d("total_findings"),
-        "by_severity": {s.value: (sev_new.get(s.value, 0) - sev_old.get(s.value, 0))
+        "by_severity": {s.value: num(sev_new.get(s.value)) - num(sev_old.get(s.value))
                         for s in Severity},
     }
 

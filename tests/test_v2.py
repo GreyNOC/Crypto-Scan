@@ -125,15 +125,18 @@ def test_cbom_nist_level_only_where_nist_pins_one():
     def level(token, **kw):
         f = classify(token, AssetType.TLS_ENDPOINT, "h:443", **kw)
         comp = cbom_mod._algorithm_component(f)
-        return comp["cryptoProperties"]["algorithmProperties"][
-            "nistQuantumSecurityLevel"]
+        return comp["cryptoProperties"]["algorithmProperties"].get(
+            "nistQuantumSecurityLevel")
 
     assert level("ECDHE", key_establishment=True) == 0   # Shor -> none
     assert level("3DES") == 0                             # legacy -> none
     assert level("AES-128") == 1                          # NIST cat 1
     assert level("AES-256") == 5                          # NIST cat 5
     assert level("SHA-256") == 0                          # hash: not pinned
-    assert level("ML-KEM") == 3                           # ML-KEM-768 class
+    # A bare 'ML-KEM' with no observed parameter set spans categories 1/3/5, so
+    # asserting a specific category would fabricate one — omit it (as with AES of
+    # unknown key size).
+    assert level("ML-KEM") is None
 
 
 def test_cbom_emits_protocol_asset_with_version_and_suites():
@@ -596,13 +599,13 @@ def test_cbom_pqc_level_is_param_set_aware():
         f = classify(token, AssetType.DEPENDENCY, "r.txt -> " + token,
                      evidence=token)
         return cbom_mod._algorithm_component(f)["cryptoProperties"][
-            "algorithmProperties"]["nistQuantumSecurityLevel"]
+            "algorithmProperties"].get("nistQuantumSecurityLevel")
     assert level("ml-kem-512") == 1
     assert level("ml-dsa-44") == 2
     assert level("ml-kem-768") == 3
     assert level("ml-kem-1024") == 5
     assert level("ml-dsa-87") == 5
-    assert level("ML-KEM") == 3            # generic, no set -> recommended cat 3
+    assert level("ML-KEM") is None         # bare family, no observed set -> omit
 
 
 def test_source_scan_has_no_duplicate_fingerprints():
@@ -695,11 +698,11 @@ def test_cbom_hybrid_nist_level_by_strength():
         f = classify(token, AssetType.TLS_ENDPOINT, "h:443",
                      key_establishment=True)
         return cbom_mod._algorithm_component(f)["cryptoProperties"][
-            "algorithmProperties"]["nistQuantumSecurityLevel"]
-    assert lvl("secp384r1mlkem1024") == 5   # ML-KEM-1024 strength
-    assert lvl("x25519mlkem768") == 3       # ML-KEM-768 strength
+            "algorithmProperties"].get("nistQuantumSecurityLevel")
+    assert lvl("secp384r1mlkem1024") == 5   # ML-KEM-1024 half -> cat 5
+    assert lvl("x25519mlkem768") == 3       # ML-KEM-768 half -> cat 3
     assert lvl("secp256r1mlkem768") == 3
-    assert lvl("ML-KEM") == 3               # generic -> recommended cat 3
+    assert lvl("ML-KEM") is None            # bare family, no observed set -> omit
 
 
 def test_diff_escalating_move_is_regression():
@@ -1566,6 +1569,193 @@ def test_cli_json_envelope_carries_scan_status(monkeypatch, tmp_path):
     cli_mod.main(["tls", "unreachable:443", "--json", str(jf), "--fail-on", "none"])
     d = _json.loads(jf.read_text(encoding="utf-8"))
     assert d["scan_status"] == "incomplete"
+
+
+# --- v0.2.6 QAQC hardening regressions -------------------------------------
+# Each pins a fix for a finding confirmed by the adversarial QAQC review pass.
+
+
+def test_pki_ec_keyagreement_cert_is_ecdh_hndl_critical(tmp_path):
+    # An EC certificate marked keyAgreement is an ECDH key-establishment artifact
+    # (RFC 5480 §3), not an ECDSA signing cert: it must classify as ECDH
+    # (KEY_AGREE) -> HNDL CRITICAL, not ECDSA (SIGNATURE) -> HIGH. Before the fix
+    # the KeyUsage was ignored and the HNDL exposure was silently lost.
+    import datetime
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptoscan import pki_scanner
+
+    def _ec_cert(curve, ku):
+        key = ec.generate_private_key(curve)
+        nm = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ec.example")])
+        return (x509.CertificateBuilder().subject_name(nm).issuer_name(nm)
+                .public_key(key.public_key()).serial_number(1)
+                .not_valid_before(datetime.datetime(2024, 1, 1))
+                .not_valid_after(datetime.datetime(2027, 1, 1))
+                .add_extension(ku, critical=True)
+                .sign(key, hashes.SHA256()))
+
+    def _ku(**kw):
+        base = dict(digital_signature=False, content_commitment=False,
+                    key_encipherment=False, data_encipherment=False,
+                    key_agreement=False, key_cert_sign=False, crl_sign=False,
+                    encipher_only=False, decipher_only=False)
+        base.update(kw)
+        return x509.KeyUsage(**base)
+
+    def _key_finding():
+        return next(x for x in pki_scanner.scan(tmp_path)
+                    if x.extra.get("role") != "cert-signature")
+
+    crt = tmp_path / "ec.crt"
+    # keyAgreement on P-256 -> ECDH, HNDL CRITICAL.
+    crt.write_bytes(_ec_cert(ec.SECP256R1(), _ku(key_agreement=True))
+                    .public_bytes(serialization.Encoding.PEM))
+    f = _key_finding()
+    assert f.fact.name == "ECDH" and f.fact.primitive is Primitive.KEY_AGREE
+    assert f.hndl_exposed() is True and f.severity() is Severity.CRITICAL
+
+    # keyAgreement on P-384 -> ECDH with the curve's true 192-bit strength.
+    crt.write_bytes(_ec_cert(ec.SECP384R1(), _ku(key_agreement=True))
+                    .public_bytes(serialization.Encoding.PEM))
+    f = _key_finding()
+    assert f.fact.name == "ECDH" and f.effective_classical_bits() == 192
+
+    # digitalSignature-only EC cert stays ECDSA -> HIGH, not HNDL.
+    crt.write_bytes(_ec_cert(ec.SECP256R1(), _ku(digital_signature=True))
+                    .public_bytes(serialization.Encoding.PEM))
+    f = _key_finding()
+    assert f.fact.name == "ECDSA" and f.hndl_exposed() is False
+    assert f.severity() is Severity.HIGH
+
+
+def test_cbom_sntrup_omits_nist_level_for_non_nist_scheme():
+    # Streamlined NTRU Prime (sntrup761) is not a NIST-standardized/categorized
+    # scheme, so the SNTRUP761X25519 hybrid must not assert a NIST category.
+    f = classify("SNTRUP761X25519", AssetType.SSH_ENDPOINT, "h:22",
+                 key_establishment=True)
+    ap = cbom_mod._algorithm_component(f)["cryptoProperties"]["algorithmProperties"]
+    assert "nistQuantumSecurityLevel" not in ap
+
+
+def test_cbom_bare_pqc_family_omits_nist_level_but_sets_resolve():
+    # A bare PQC family token spans several NIST categories -> assert none. A
+    # concrete parameter set observed in evidence still resolves to its category.
+    for token in ("dilithium", "sphincs", "falcon", "kyber", "mlkem"):
+        f = classify(token, AssetType.DEPENDENCY, "r.txt -> " + token,
+                     evidence=token)
+        ap = cbom_mod._algorithm_component(f)["cryptoProperties"][
+            "algorithmProperties"]
+        assert "nistQuantumSecurityLevel" not in ap, token
+    f = classify("slh-dsa", AssetType.DEPENDENCY, "r.txt -> pkg",
+                 evidence="slh-dsa-192f")
+    ap = cbom_mod._algorithm_component(f)["cryptoProperties"]["algorithmProperties"]
+    assert ap["nistQuantumSecurityLevel"] == 3
+
+
+def test_cbom_omits_unobserved_execution_environment():
+    # No scan surface observes where key material executes, so the optional
+    # executionEnvironment field must never be asserted.
+    for f in (classify("AES-256", AssetType.TLS_ENDPOINT, "h:443"),
+              classify("ECDH", AssetType.TLS_ENDPOINT, "h:443",
+                       key_establishment=True),
+              classify("X25519", AssetType.SSH_ENDPOINT, "h:22",
+                       key_establishment=True)):
+        ap = cbom_mod._algorithm_component(f)["cryptoProperties"][
+            "algorithmProperties"]
+        assert "executionEnvironment" not in ap
+
+
+def test_diff_tolerates_malformed_summary_block():
+    # A tampered/older-format envelope whose summary (or by_severity) is not a
+    # dict, or whose counts are non-numeric, must degrade to zero deltas — not an
+    # AttributeError/TypeError traceback.
+    fp = "a" * 16
+    finding = {"fingerprint": fp, "algorithm": "RSA", "asset_type": "source",
+               "locator": "x.py:1", "severity": "HIGH"}
+    good = {"target": "t", "summary": {}, "findings": [finding]}
+    for bad_summary in ([1, 2], 42, "nope", {"by_severity": [1, 2]},
+                        {"by_severity": 5}, {"total_findings": "x"}):
+        bad = {"target": "t", "summary": bad_summary, "findings": [finding]}
+        d1 = diff_mod.build_diff(good, bad)         # must not raise
+        d2 = diff_mod.build_diff(bad, good)         # must not raise (other order)
+        assert d1["deltas"]["total_findings"] == 0
+        assert isinstance(d2["deltas"]["by_severity"], dict)
+
+
+def test_diff_load_coerces_nondict_summary(tmp_path):
+    # load_findings_json must coerce a present-but-non-dict summary to {} so the
+    # documented "clean ValueError or valid dict" contract holds.
+    fp = "b" * 16
+    p = tmp_path / "f.json"
+    p.write_text(_json.dumps({"target": "t", "summary": [1, 2],
+                              "findings": [{"fingerprint": fp}]}),
+                 encoding="utf-8")
+    data = diff_mod.load_findings_json(str(p))
+    assert data["summary"] == {}
+
+
+def test_ssh_ecdh_ecdsa_report_true_curve_strength():
+    # P-384/P-521 SSH ECDH/ECDSA must report their real 192/256-bit strength, not
+    # the ECDH/ECDSA facts' 128-bit nominal — the curve is in the algorithm name.
+    obs = _ssh.SSHObservation(
+        host="h", port=22, banner="SSH-2.0-x",
+        kex_algorithms=["ecdh-sha2-nistp384", "ecdh-sha2-nistp521",
+                        "ecdh-sha2-nistp256"],
+        host_key_algorithms=["ecdsa-sha2-nistp521", "ecdsa-sha2-nistp384"],
+        encryption_algorithms=[], mac_algorithms=[])
+    fs = _ssh.scan("h", 22, obs=obs)
+    bits = {(f.fact.name, f.evidence): f.effective_classical_bits() for f in fs}
+    assert bits[("ECDH", "ecdh-sha2-nistp384")] == 192
+    assert bits[("ECDH", "ecdh-sha2-nistp521")] == 256
+    assert bits[("ECDH", "ecdh-sha2-nistp256")] == 128
+    assert bits[("ECDSA", "ecdsa-sha2-nistp521")] == 256
+    assert bits[("ECDSA", "ecdsa-sha2-nistp384")] == 192
+
+
+def test_ssh_banner_sanitizer_strips_control_bytes():
+    # A hostile banner's ANSI/control sequences must be stripped (CWE-150).
+    clean = _ssh._sanitize_banner("SSH-2.0-\x1b[2J\x1b[31mEVIL\x07\r")
+    assert "\x1b" not in clean and "\x07" not in clean and "\r" not in clean
+    assert clean == "SSH-2.0-[2J[31mEVIL"
+
+
+class _FakeBannerSock:
+    """Minimal socket yielding preset recv() chunks, then EOF."""
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+
+    def settimeout(self, _t):
+        pass
+
+    def recv(self, _n):
+        return self._chunks.pop(0) if self._chunks else b""
+
+
+def test_ssh_read_until_banner_waits_for_full_crlf_and_sanitizes():
+    # A banner split across recv()s must not be accepted until its CRLF arrives
+    # (else it truncates and mis-slices the leftover), and its control bytes are
+    # stripped. First chunk ends mid-banner: the old code accepted "SSH-2.0-Ev".
+    sock = _FakeBannerSock([b"pre-login\r\nSSH-2.0-Ev", b"il\x1b[31m\r\nEXTRA"])
+    banner, leftover = _ssh._read_until_banner(sock, 1.0)
+    assert banner == "SSH-2.0-Evil[31m"      # full line, ESC stripped
+    assert leftover == b"EXTRA"               # sliced correctly past the CRLF
+
+
+def test_sarif_rule_reflects_worst_severity_regardless_of_order():
+    # A rule's security-severity (GitHub's alert-ranking signal) must reflect the
+    # worst severity among its results, independent of finding input order.
+    hi = classify("RSA", AssetType.SOURCE, "a.py:1", key_establishment=False)
+    crit = classify("RSA", AssetType.SOURCE, "b.py:1", key_establishment=True)
+    assert hi.severity() is Severity.HIGH and crit.severity() is Severity.CRITICAL
+    for order in ([hi, crit], [crit, hi]):
+        doc = sarif_mod.build_sarif(order, "t")
+        rules = doc["runs"][0]["tool"]["driver"]["rules"]
+        rule = next(r for r in rules if r["id"] == "greynoc/shor-broken/RSA")
+        assert rule["properties"]["security-severity"] == "9.5"
+        assert rule["defaultConfiguration"]["level"] == "error"
 
 
 if __name__ == "__main__":

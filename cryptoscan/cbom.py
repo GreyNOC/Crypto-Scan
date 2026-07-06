@@ -60,32 +60,30 @@ def _nist_level(f: Finding) -> int | None:
     return 0
 
 
-def _pqc_level(f: Finding) -> int:
-    """Standardized-PQC NIST category, param-set-aware where the set is known.
+def _pqc_level(f: Finding) -> int | None:
+    """Standardized-PQC NIST category, from an OBSERVED NIST parameter set.
 
-    The canonical PQC facts have a generic name ('ML-KEM') and usually no
-    `parameter`, so we look for a known parameter-set token in the parameter and
-    the observed evidence (e.g. a dependency named 'ml-kem-512'). Default to the
-    recommended category-3 sets (ML-KEM-768 / ML-DSA-65) when none is observed.
+    NIST assigns categories per parameter set (FIPS 203/204/205), not per family,
+    so we assert a category only when a real ML-KEM/ML-DSA/SLH-DSA/FN-DSA
+    parameter set is present in the fact name, parameter, or evidence. Matching is
+    hyphen/underscore-insensitive so a hybrid group name (e.g. 'X25519MLKEM768',
+    'SecP384r1MLKEM1024') resolves to its ML-KEM half (mlkem768 -> cat 3,
+    mlkem1024 -> cat 5).
+
+    Returns None — so the caller omits nistQuantumSecurityLevel rather than
+    fabricate one — for a bare family name ('ML-KEM'/'ML-DSA' with no observed
+    set) or a non-NIST PQ scheme (e.g. Streamlined NTRU Prime in SNTRUP761X25519,
+    which NIST never categorized). This mirrors the unknown-key-size AES handling
+    in _nist_level: assert nothing rather than invent a category.
     """
-    for src in (f.parameter, f.evidence, f.fact.name):
+    for src in (f.fact.name, f.parameter, f.evidence):
         if not src:
             continue
-        low = str(src).lower()
+        low = str(src).lower().replace("-", "").replace("_", "")
         for param_set, category in PQC_PARAM_SETS.items():
-            if param_set in low:
+            if param_set.replace("-", "").replace("_", "") in low:
                 return category
-    # Hybrid groups (e.g. SecP384r1MLKEM1024) carry their strength via the
-    # fact's quantum_bits rather than a parameter-set token; map that to a
-    # category so the highest-security hybrid isn't under-reported as cat-3.
-    qb = f.fact.quantum_bits
-    if qb is not None:
-        if qb >= 192:
-            return 5
-        if qb >= 128:
-            return 3
-        return 1
-    return 3
+    return None
 
 
 def _primitive_to_cdx(p: Primitive) -> str:
@@ -108,7 +106,10 @@ _SUITE_ROLES = {"key-exchange", "authentication", "bulk-cipher", "mac"}
 def _algorithm_component(f: Finding) -> dict:
     algo_props = {
         "primitive": _primitive_to_cdx(f.fact.primitive),
-        "executionEnvironment": "software-plain-ram",
+        # executionEnvironment (software-plain-ram | -tee | hardware | ...) is an
+        # OPTIONAL CycloneDX field describing where the key material lives. No
+        # scan surface observes this — a remote TLS/SSH/IKE peer's environment is
+        # invisible to us — so we omit it rather than assert an unobserved fact.
         "cryptoFunctions": _crypto_functions(f),
     }
     # Only assert a NIST category where one is actually known — omit the optional

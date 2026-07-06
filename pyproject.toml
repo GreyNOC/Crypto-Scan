@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "greynoc-cryptoscan"
-version = "0.2.5"
+version = "0.2.6"
 description = "GreyNOC CryptoScan — Cryptographic Posture Management & PQC migration scanner (CBOM + Mosca risk engine)"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -109,6 +109,15 @@ _NON_CRYPTO = {"ext-info-c", "ext-info-s",
                "kex-strict-c-v00@openssh.com", "kex-strict-s-v00@openssh.com"}
 
 
+def _sanitize_banner(raw: str) -> str:
+    """Neutralize a server-supplied identification banner before it reaches a
+    terminal, a log, or the JSON/report output. A hostile server can embed ANSI
+    escape / control sequences in its SSH- line (CWE-150 terminal injection); RFC
+    4253 §4.2 forbids control characters in the identification string anyway, so
+    keep only printable characters (spaces included) and cap the length."""
+    return "".join(c for c in raw if c.isprintable())[:255]
+
+
 @dataclass
 class SSHObservation:
     host: str
@@ -129,8 +138,13 @@ def _read_until_banner(sock: socket.socket, timeout: float) -> tuple[str, bytes]
     """
     buf = b""
     sock.settimeout(timeout)
-    while b"\r\n" not in buf or not any(
-            line.startswith(b"SSH-") for line in buf.split(b"\r\n")):
+    # Keep reading until we have a fully CRLF-terminated 'SSH-' line. split()'s
+    # last segment may be a not-yet-terminated fragment, so exclude it ([:-1]) —
+    # otherwise a partial banner (e.g. b"pre\r\nSSH-2.0-Op" still in flight) would
+    # be accepted truncated and mis-slice the leftover byte stream (RFC 4253 §4.2:
+    # the id string is CR LF terminated).
+    while not any(line.startswith(b"SSH-")
+                  for line in buf.split(b"\r\n")[:-1]):
         chunk = sock.recv(4096)
         if not chunk:
             break
@@ -144,7 +158,7 @@ def _read_until_banner(sock: socket.socket, timeout: float) -> tuple[str, bytes]
     for line in lines:
         consumed += len(line) + 2
         if line.startswith(b"SSH-"):
-            banner = line.decode("latin-1", "replace")
+            banner = _sanitize_banner(line.decode("latin-1", "replace"))
             break
     leftover = buf[consumed:] if consumed <= len(buf) else b""
     return banner, leftover
@@ -231,6 +245,31 @@ def _dh_parameter(algo: str) -> str | None:
     return None
 
 
+# ECDH/ECDSA SSH names embed the NIST curve (ecdh-sha2-nistp384, RFC 5656). Map
+# it to the CURVE_FACTS key so P-384/P-521 report their true 192/256-bit strength
+# instead of the ECDH/ECDSA facts' 128-bit nominal. curve25519 is its own X25519
+# token (already 128-bit), so it needs no mapping here.
+_EC_CURVES = {"nistp256": "secp256r1", "nistp384": "secp384r1",
+              "nistp521": "secp521r1"}
+
+
+def _ec_parameter(algo: str) -> str | None:
+    for marker, curve in _EC_CURVES.items():
+        if marker in algo:
+            return curve
+    return None
+
+
+def _algo_parameter(token: str, algo: str) -> str | None:
+    """Strength parameter (modulus bits or curve) recoverable from an SSH algo
+    name, so the classifier reports the true key strength rather than a nominal."""
+    if token == "DH":
+        return _dh_parameter(algo)
+    if token in ("ECDH", "ECDSA"):
+        return _ec_parameter(algo)
+    return None
+
+
 def scan(host: str, port: int = 22, timeout: float = 8.0, *,
          obs: "SSHObservation | None" = None) -> list[Finding]:
     """Probe an SSH endpoint and emit classified Findings for its full offered
@@ -254,7 +293,7 @@ def scan(host: str, port: int = 22, timeout: float = 8.0, *,
             token, AssetType.SSH_ENDPOINT, locator,
             evidence=algo,
             key_establishment=key_est,
-            parameter=_dh_parameter(algo) if token == "DH" else None,
+            parameter=_algo_parameter(token, algo),
             extra={"role": role, "banner": obs.banner},
         )
         if f and f.fingerprint not in seen:

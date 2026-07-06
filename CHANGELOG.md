@@ -3,6 +3,66 @@
 All notable changes to GreyNOC CryptoScan are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.6] — Second QAQC pass (no-fabrication, false-negatives, fidelity, safety)
+
+Another adversarial QAQC pass over the released code: a 10-lane finder fan-out
+(no-fabrication × every surface, correctness, schema-validity, security) with
+every candidate independently re-checked by three skeptics (default-to-refuted).
+Ten findings survived verification; each has a fix and a regression test. No new
+scan surfaces. Suite: 150 passed / 2 skipped, `ruff` clean, CBOM still validates
+against the CycloneDX 1.6 strict schema.
+
+### Fixed — no-fabrication (the cardinal rule)
+- **A non-NIST PQ hybrid no longer gets a NIST category.** The CBOM assigned
+  `nistQuantumSecurityLevel = 3` to `SNTRUP761X25519` (OpenSSH's default KEX),
+  whose PQ half is Streamlined NTRU Prime — a scheme NIST never standardized or
+  categorized. The category is now derived only from an *observed* NIST parameter
+  set, so ML-KEM hybrids (`X25519MLKEM768` → 3, `SecP384r1MLKEM1024` → 5) still
+  resolve while NTRU-Prime hybrids assert nothing.
+- **Bare PQC family names omit the category instead of defaulting to cat 3.** A
+  generic `ML-KEM` / `ML-DSA` / `SLH-DSA` / `FN-DSA` finding with no observed
+  parameter set spans NIST categories 1–5; pinning it to 3 fabricated a specific
+  one. It is now omitted (the same discipline as AES of unknown key size); a
+  concrete set observed in evidence still resolves (`ml-kem-512` → 1).
+- **`executionEnvironment` is no longer asserted.** Every algorithm component
+  hardcoded `software-plain-ram`, an environment no scan surface can observe (a
+  remote peer's key storage is invisible to us). The optional field is now omitted.
+
+### Fixed — false negatives (silent misses)
+- **ECDH certificates are HNDL-assessed.** An EC certificate whose KeyUsage marks
+  `keyAgreement` is an ECDH key-establishment artifact (RFC 5480 §3), but shared
+  the id-ecPublicKey SPKI with ECDSA and was classified as an ECDSA *signature*
+  cert — discarding its key-establishment role and losing the harvest-now-
+  decrypt-later exposure (a CRITICAL under-reported as HIGH). Such certs now map
+  to the curve-aware ECDH fact → HNDL CRITICAL; digitalSignature-only EC certs
+  stay ECDSA HIGH.
+
+### Fixed — fidelity (faithful strength)
+- **SSH P-384/P-521 report their true strength.** `ecdh-sha2-nistp384/521` and
+  `ecdsa-sha2-nistp384/521` discarded the curve encoded in the algorithm name and
+  fell back to the 128-bit nominal; they now report 192/256-bit (per
+  `CURVE_FACTS`), matching how the IKE/TLS/PKI surfaces already handle curves.
+
+### Fixed — safety / robustness
+- **Hostile SSH banners can't inject terminal escapes.** A server-supplied
+  identification string was decoded latin-1 (preserving every control byte) and
+  printed raw to the operator's terminal and stored into JSON/report output
+  (CWE-150). It is now sanitized at the source — control/non-printable bytes
+  stripped, length-capped — so every downstream consumer gets a clean value.
+- **The SSH banner read waits for a full CRLF-terminated line.** A banner arriving
+  in fragments could be accepted truncated (and mis-slice the following byte
+  stream) because the loop inspected the still-incomplete trailing split segment;
+  it now excludes that segment (RFC 4253 §4.2).
+- **`diff` tolerates a malformed summary block.** A tampered/older-format envelope
+  whose `summary` (or its `by_severity`) was not a dict, or whose counts were
+  non-numeric, crashed `build_diff` with an `AttributeError` traceback; it now
+  coerces to zero deltas, and `load_findings_json` normalizes a non-dict summary.
+- **SARIF rule severity reflects the worst result.** A rule's
+  `security-severity` (GitHub's alert-ranking signal) was fixed by the first
+  finding to create it; it now tracks the maximum severity across a rule id, so
+  rule-level risk can't be understated by input order (defensive — not reachable
+  through the current pipeline).
+
 ## [0.2.5] — QAQC hardening pass (no-fabrication, safety, fidelity)
 
 A multi-surface adversarial review (correctness + no-fabrication + schema-validity

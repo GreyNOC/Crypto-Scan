@@ -112,6 +112,7 @@ def _message(f: Finding) -> str:
 def build_sarif(findings: list[Finding], target: str) -> dict:
     rules: dict[str, dict] = {}
     rule_index: dict[str, int] = {}
+    rule_sev: dict[str, Severity] = {}
     results: list[dict] = []
     seen: set[str] = set()
 
@@ -125,12 +126,22 @@ def build_sarif(findings: list[Finding], target: str) -> dict:
         if loc is None:
             continue
         rid = _rule_id(f)
+        sev = f.severity()
         if rid not in rules:
             # Index matches the position in list(rules.values()) below, so the
             # result's ruleIndex resolves its rule metadata (security-severity,
             # help) directly — what GitHub code scanning prefers over id-only.
             rule_index[rid] = len(rules)
             rules[rid] = _rule(f)
+            rule_sev[rid] = sev
+        elif sev.rank > rule_sev[rid].rank:
+            # Same rule id, higher severity: the rule's defaultConfiguration.level
+            # and properties.security-severity (GitHub's alert-ranking signal)
+            # must reflect the WORST severity seen for the rule, not whichever
+            # finding created it first. Non-severity fields are identical across a
+            # rule id (same fact), so rebuilding from the worst finding is safe.
+            rules[rid] = _rule(f)
+            rule_sev[rid] = sev
         results.append({
             "ruleId": rid,
             "ruleIndex": rule_index[rid],

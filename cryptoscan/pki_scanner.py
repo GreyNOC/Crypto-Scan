@@ -144,6 +144,19 @@ def _cert_key_establishment(cert: x509.Certificate) -> bool:
         return False
 
 
+def _cert_ec_key_agreement(cert: x509.Certificate) -> bool:
+    """True when an EC cert's KeyUsage sets keyAgreement — the marker that its
+    key is an ECDH key-agreement key (RFC 5480 §3) rather than an ECDSA signing
+    key. Both carry the identical id-ecPublicKey SPKI (OID 1.2.840.10045.2.1) and
+    `cryptography` yields an EllipticCurvePublicKey for either, so KeyUsage is the
+    only wire signal that distinguishes them."""
+    try:
+        ku = cert.extensions.get_extension_for_class(x509.KeyUsage).value
+        return bool(ku.key_agreement)
+    except Exception:  # noqa: BLE001 — absent/invalid KeyUsage: treat as signing
+        return False
+
+
 def _load_public_key(data: bytes):
     for loader in (serialization.load_pem_public_key,
                    serialization.load_der_public_key,
@@ -169,6 +182,13 @@ def _emit_cert(cert: x509.Certificate, locator: str,
                findings: list[Finding], seen: set) -> None:
     pubkey = cert.public_key()
     token, param = _key_token(pubkey)
+    # An EC cert marked keyAgreement is an ECDH (key-establishment) artifact, not
+    # an ECDSA signing cert — reporting it as ECDSA (a SIGNATURE primitive) would
+    # discard the key-establishment role and lose the harvest-now-decrypt-later
+    # exposure (a CRITICAL under-reported as HIGH). Remap to the ECDH KEY_AGREE
+    # fact, which is curve-aware, so the observed strength/severity stay faithful.
+    if token == "ECDSA" and _cert_ec_key_agreement(cert):
+        token = "ECDH"
     try:
         subject = cert.subject.rfc4514_string()
         issuer = cert.issuer.rfc4514_string()
